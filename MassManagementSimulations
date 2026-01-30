@@ -1,0 +1,764 @@
+"""
+Mass Simulation with L1B and Aircraft-Level Monte Carlo Simulation
+------------------------------------------------------------------------------
+- Imports inputs from Excel (Sheet name: "PBS Mass Estimates").
+- Identifies Level 2 rows via Column A == "Level 2".
+- Assigns L2 components to L1B groups by tracking the preceding "Level 1B" header.
+- Builds PERT distributions (target ± uncertainties) with non-negative lower bound.
+- Runs Monte Carlo for each L1B group and for the entire aircraft (combined L2).
+- Plotting features: component PERT PDFs, L1B PDFs/CDFs, aircraft PDFs/CDF with text boxes.
+- Prints verification tables per L1B group + summary stats and saves plots/CSV.
+
+Author: Erwin @ VÆRIDION 
+"""
+
+#%%
+# -----------------------------
+# Imports
+# -----------------------------
+import os
+import re
+import math
+import numpy as np
+import pandas as pd
+import matplotlib
+matplotlib.use("Agg")
+import matplotlib.pyplot as plt
+
+from pathlib import Path
+
+# Use SciPy if available
+from scipy.stats import beta as _scipy_beta
+from scipy.stats import gaussian_kde as _scipy_gaussian_kde
+
+# -----------------------------
+# Configuration
+# -----------------------------
+
+# Monte‑Carlo settings
+N_SAMPLES = 500_000
+RNG = np.random.default_rng(42)
+
+# Expected L1B group names in Column B near a "Level 1B" row
+EXPECTED_GROUPS = {"Design Margin", "Vehicle Systems", "Airframe", "Propulsion"}
+
+# -----------------------------
+# Excel import (raw matrix)
+# -----------------------------
+
+# --- Flexible base-folder logic ---
+file_location = os.path.dirname(os.path.abspath(__file__))
+base_folder = os.path.dirname(os.path.dirname(os.path.dirname(file_location)))
+
+# --- OneDrive path to the PBS workbook ---
+home_dir = os.path.expanduser("~")
+file_path = os.path.join(
+    home_dir,
+    "Vaeridion GmbH",
+    "Aircraft Team - 0055 Mass and Performance Management",
+    "00 Mass Management Strategy",
+    "01_Tools_&_Spreadsheets",
+    "PBS Mass Management.xlsx",
+)
+
+# --- Pick newest sheet: PBS_Masses_YYYYMMDD ---
+xf = pd.ExcelFile(file_path, engine="openpyxl")
+candidates = []
+for sn in xf.sheet_names:
+    m = re.fullmatch(r"PBS_Masses_(\d{8})", sn)  # exact match, 8 digits
+    if m:
+        candidates.append((sn, int(m.group(1))))
+
+if not candidates:
+    raise ValueError("No sheets found matching 'PBS_Masses_YYYYMMDD'.")
+
+newest_sheet = max(candidates, key=lambda x: x[1])[0]
+df = pd.read_excel(xf, sheet_name=newest_sheet, header=None, engine="openpyxl")
+print(f"Loaded newest sheet: {newest_sheet}\n")
+
+# -----------------------------
+# Utilities
+# -----------------------------
+def to_float(x, default=0.0):
+    """Coerce x to float, returning default if NaN/None/''."""
+    try:
+        if pd.isna(x):
+            return default
+        if isinstance(x, str):
+            s = x.strip().replace("%", "")
+            if s == "":
+                return default
+            return float(s)
+        return float(x)
+    except Exception:
+        return default
+
+def sanitize_filename(name: str) -> str:
+    """Create safe filenames from titles/group names."""
+    name = (name or "").strip()
+    name = re.sub(r"[^\w\s\-\._]+", "", name, flags=re.UNICODE)
+    name = re.sub(r"\s+", "_", name)
+    return name[:120] if len(name) > 120 else name
+
+# -----------------------------
+# Top-level aircraft inputs
+# -----------------------------
+# Confirmed cells:
+#   MTOM             -> B2 (df.iloc[1,1])
+#   Payload          -> B3 (df.iloc[2,1])
+#   In-service MG    -> B4 (df.iloc[3,1])  absolute kg
+#   Confidence level -> B5 (df.iloc[4,1])  %
+#   Mass Margin      -> B6 (df.iloc[5,1])  %
+
+DESIRED_MTOM = to_float(df.iloc[1, 1])
+DESIRED_PAYLOAD = to_float(df.iloc[2, 1])
+IN_SERVICE_MASS_GROWTH = to_float(df.iloc[3, 1])          # absolute (kg)
+CONFIDENCE_LEVEL = to_float(df.iloc[4, 1])                 # % (e.g., 80)
+APPLICABLE_MASS_MARGIN_PCT = to_float(df.iloc[5, 1])
+
+AIRCRAFT_MASS_LIMIT = DESIRED_MTOM - DESIRED_PAYLOAD
+ENTRY_INTO_SERVICE_MASS = AIRCRAFT_MASS_LIMIT - IN_SERVICE_MASS_GROWTH
+OEM_TARGET = ENTRY_INTO_SERVICE_MASS * (1.0 - APPLICABLE_MASS_MARGIN_PCT / 100.0)
+
+print("=== Imported Aircraft Parameters ===")
+print(f"MTOM                        : {DESIRED_MTOM:.1f} kg")
+print(f"Payload                     : {DESIRED_PAYLOAD:.1f} kg")
+print(f"Aircraft mass limit (OEM)   : {AIRCRAFT_MASS_LIMIT:.1f} kg")
+print(f"In-service mass growth      : {IN_SERVICE_MASS_GROWTH:.1f} kg")
+print(f"Entry-into-service mass     : {ENTRY_INTO_SERVICE_MASS:.1f} kg")
+print(f"OEM target mass             : {OEM_TARGET:.1f} kg  (with {APPLICABLE_MASS_MARGIN_PCT:.1f}% margin)")
+print(f"Confidence level            : P{CONFIDENCE_LEVEL:.0f}\n")
+print(f"Mass margin from sheet: {APPLICABLE_MASS_MARGIN_PCT:.1f}%\n")
+
+
+# -----------------------------
+# L1B group detection helpers
+# -----------------------------
+def find_group_name_around(df, i, max_lookahead=6):
+    """
+    From a 'Level 1B' row index i, try to locate a group name in Column B (col=1)
+    either in the same row or within the next few rows.
+    """
+    b0 = df.iloc[i, 1]
+    if isinstance(b0, str) and b0.strip() in EXPECTED_GROUPS:
+        return b0.strip()
+
+    for k in range(1, max_lookahead + 1):
+        if (i + k) >= len(df):
+            break
+        b = df.iloc[i + k, 1]
+        if isinstance(b, str) and b.strip() in EXPECTED_GROUPS:
+            return b.strip()
+    return None
+
+
+# -----------------------------
+# Extract L2 components with corrected mapping
+# -----------------------------
+# Correct mapping according to the spreadsheet:
+# A: "Level 2"
+# B: Title
+# C: Basic Mass
+# D: MGA
+# E: Predicted (ignored)
+# F: + Uncertainty
+# G: - Uncertainty
+# H: RDF
+
+components = []  # dicts: {group, name, basic, mga, pos_unc, neg_unc, rdf, target}
+
+current_group = None
+for i in range(len(df)):
+    a = df.iloc[i, 0]
+
+    # Detect Level 1B group headers
+    if isinstance(a, str) and a.strip() == "Level 1B":
+        g = find_group_name_around(df, i)
+        current_group = g or current_group
+        continue
+
+    # Process Level 2 rows
+    if isinstance(a, str) and a.strip() == "Level 2":
+        name = df.iloc[i, 1]
+        if not isinstance(name, str) or name.strip() == "":
+            continue
+
+        # -----------------------------
+        # CORRECTED COLUMN MAPPING
+        # -----------------------------
+        basic = to_float(df.iloc[i, 2], 0.0)     # Column C → Basic Mass
+        mga   = to_float(df.iloc[i, 3], 0.0)     # Column D → MGA
+        pos_unc = to_float(df.iloc[i, 5], 0.0)   # Column F → Positive uncertainty
+        neg_unc = to_float(df.iloc[i, 6], 0.0)   # Column G → Negative uncertainty
+        rdf     = to_float(df.iloc[i, 7], 1.0)   # Column H → RDF
+
+        # Mass target (as in original logic)
+        if rdf == 0:
+            rdf = 1.0
+        target = (basic + mga) * rdf
+
+        components.append({
+            "group": current_group if current_group else "Unknown",
+            "name": name.strip(),
+            "basic": basic,
+            "mga": mga,
+            "pos_unc": abs(pos_unc),
+            "neg_unc": -abs(neg_unc),
+            "rdf": rdf,
+            "target": target
+        })
+
+# Regroup components into L1B groups
+by_group = {}
+for c in components:
+    by_group.setdefault(c["group"], []).append(c)
+
+print(f"Total L2 components imported: {len(components)}")
+for g, items in by_group.items():
+    print(f"  {g}: {len(items)} components")
+print()
+
+
+# -----------------------------
+# Verification tables per L1B
+# -----------------------------
+def build_group_table(items):
+    rows = []
+    for it in items:
+        rows.append({
+            "Title": it["name"],
+            "Basic [kg]": it["basic"],
+            "MGA [kg]": it["mga"],
+            "+Unc [kg]": it["pos_unc"],
+            "-Unc [kg]": it["neg_unc"],
+            "RDF": it["rdf"],
+            "Target = (Basic+MGA)*RDF [kg]": it["target"],
+        })
+    return pd.DataFrame(rows)
+
+print("=== L1B Import Verification Tables ===")
+for group_name, items in by_group.items():
+    df_tbl = build_group_table(items)
+    print(f"\n--- {group_name} ---")
+    if df_tbl.empty:
+        print("(no components)")
+    else:
+        # Sort by Title for easier visual check
+        print(df_tbl.sort_values("Title").to_string(index=False))
+
+# -----------------------------
+# PERT distribution core
+# -----------------------------
+def make_pert_params(target, neg, pos, weight=4.0):
+    """
+    Build parameters for a PERT-like Beta on [a,b] with mode m=target.
+      a = max(target + neg, 0)  # clamp to zero (physical sanity)
+      b = max(target + pos, 0)
+    If a == b -> degenerate (fixed) value.
+    Returns:
+      - (None, a, b, m) if degenerate (fixed)
+      - (a, b, alpha, beta_param, m) otherwise
+    """
+    a = target + neg
+    b = target + pos
+
+    # Physical constraint: mass cannot be negative
+    a = max(a, 0.0)
+    b = max(b, 0.0)
+
+    # Degenerate -> fixed value
+    if np.isclose(a, b):
+        m = a
+        return (None, a, b, m)
+
+    # Keep mode inside [a,b]
+    m = np.clip(target, a, b)
+    scale = b - a
+    alpha = 1.0 + weight * (m - a) / scale
+    beta_param = 1.0 + weight * (b - m) / scale
+    return (a, b, alpha, beta_param, m)
+
+def sample_pert(params, size):
+    """Draw PERT samples for given params tuple."""
+    if params[0] is None:  # fixed value
+        return np.full(size, params[-1])
+    a, b, alpha, beta_param, _ = params
+    u = RNG.beta(alpha, beta_param, size=size)
+    return a + u * (b - a)
+
+#%%
+# -----------------------------
+# Monte‑Carlo engine
+# -----------------------------
+def run_monte_carlo(params_list, n_samples=N_SAMPLES):
+    """Sum of sampled masses across a list of PERT parameter sets."""
+    if not params_list:
+        return np.array([])
+    samples = [sample_pert(p, n_samples) for p in params_list]
+    arr = np.vstack(samples)
+    return arr.sum(axis=0)
+
+# -----------------------------
+# PERT Component PDF Plotting (Restored from original code)
+# -----------------------------
+def plot_component_pdfs(components, pert_params, plot_name="Input Components"):
+    """
+    Restored multi‑subplot PERT PDF plotting exactly like the original:
+    - 2 columns
+    - shaded PDFs
+    - min/max markers
+    - mode (target) line
+    - titles and grid
+    - saved to PNG
+    """
+    n = len(components)
+    if n == 0:
+        return
+
+    ncols = 2
+    nrows = int(np.ceil(n / ncols))
+
+    fig, axes = plt.subplots(nrows, ncols, figsize=(12, 3.5 * nrows), squeeze=False)
+
+    for idx, (name, t, d, u) in enumerate(components):
+        r = idx // ncols
+        c = idx % ncols
+        ax = axes[r][c]
+
+        params_idx = pert_params[idx]
+
+        if params_idx[0] is None:
+            # Fixed-value vertical line
+            ax.axvline(t, color="k", linestyle="--", label=f"{name} (fixed)")
+            ax.plot(t, 1.0, marker="v", color="k")  # small spike marker (arbitrary y)
+            ax.set_ylim(0, 1.05)
+            ax.text(t, 1.0, f"{t:.1f}", ha="center", va="bottom", fontsize=8)
+        else:
+            a, b, alpha, beta_param, m = params_idx
+            # Build a PERT-like PDF using scipy's beta if available
+            xs = np.linspace(a, b, 400)
+
+            from scipy.stats import beta
+            pdf_values = beta.pdf((xs - a) / (b - a), alpha, beta_param) / (b - a)
+
+            ax.plot(xs, pdf_values, label=name)
+            ax.fill_between(xs, pdf_values, alpha=0.15)
+
+            # Min/max markers
+            ax.plot(a, 0, marker="o", color="red", markersize=5)
+            ax.text(a, 0, f"{a:.1f}", ha="right", va="bottom", fontsize=8)
+            ax.plot(b, 0, marker="o", color="red", markersize=5)
+            ax.text(b, 0, f"{b:.1f}", ha="left", va="bottom", fontsize=8)
+
+            # Mode / target line
+            ax.axvline(t, color="k", linestyle=":", lw=1.5, label=f"Predicted: {t:.1f}")
+            ax.text(t, ax.get_ylim()[1]*0.95, f"{t:.1f}",
+                    ha="center", va="top", fontsize=8, color="k")
+
+        ax.set_title(name)
+        ax.set_xlabel("Mass [kg]")
+        ax.set_ylabel("Density")
+        ax.grid(True, alpha=0.25)
+        ax.legend(loc="upper right", fontsize="small")
+
+    # Hide extra empty axes
+    total_subplots = nrows * ncols
+    for idx in range(n, total_subplots):
+        r = idx // ncols
+        c = idx % ncols
+        axes[r][c].axis("off")
+
+    plt.suptitle(plot_name)
+    plt.tight_layout(rect=[0, 0, 1, 0.98])
+    fname = sanitize_filename(plot_name) + ".png"
+    plt.savefig(fname, dpi=300)
+    plt.close()
+
+# -----------------------------
+# L1B Group Monte-Carlo Plots (PDF & CDF)
+# -----------------------------
+def plot_monte_carlo_pdf(samples, title):
+    if samples.size == 0:
+        return
+
+    plt.figure(figsize=(10, 6))
+    plt.hist(samples, bins=200, density=True, alpha=0.5, label="Histogram")
+
+    kde = _scipy_gaussian_kde(samples)
+    xs = np.linspace(samples.min(), samples.max(), 400)
+    plt.plot(xs, kde(xs), "r-", lw=2, label="KDE")
+
+    # Percentile lines
+    percentiles = [25, 50, 75]
+    values = np.percentile(samples, percentiles)
+    colors = ["C0", "C1", "C2"]
+
+    for p, v, col in zip(percentiles, values, colors):
+        plt.axvline(v, color=col, linestyle="--", lw=1)
+        y = kde(v)
+        plt.plot(v, y, marker="o", color=col)
+        plt.annotate(f"P{p}: {v:.1f} kg",
+                     xy=(v, y),
+                     xytext=(5, 5),
+                     textcoords="offset points",
+                     fontsize=9,
+                     color=col)
+
+    plt.title(title)
+    plt.xlabel("Mass [kg]")
+    plt.ylabel("Density")
+    plt.legend()
+    plt.grid(True, alpha=0.3)
+    plt.tight_layout()
+
+    fname = sanitize_filename(title) + ".png"
+    plt.savefig(fname, dpi=300)
+    plt.close()
+
+def plot_monte_carlo_cdf(samples, title):
+    if samples.size == 0:
+        return
+
+    sorted_samples = np.sort(samples)
+    cdf = np.arange(1, len(samples) + 1) / len(samples)
+
+    plt.figure(figsize=(10, 6))
+    plt.plot(sorted_samples, cdf, "b-", lw=2)
+
+    percentiles = [25, 50, 75]
+    values = np.percentile(sorted_samples, percentiles)
+    colors = ["C0", "C1", "C2"]
+
+    for p, v, col in zip(percentiles, values, colors):
+        y = p / 100.0
+        plt.axvline(v, color=col, linestyle="--", lw=1)
+        plt.axhline(y, color=col, linestyle=":", lw=1)
+        plt.plot(v, y, marker="o", color=col)
+        plt.annotate(f"P{p}: {v:.1f} kg",
+                     xy=(v, y),
+                     xytext=(5, 5),
+                     textcoords="offset points",
+                     fontsize=9,
+                     color=col)
+
+    plt.title(title)
+    plt.xlabel("Mass [kg]")
+    plt.ylabel("Cumulative Probability")
+    plt.grid(True, alpha=0.3)
+    plt.tight_layout()
+
+    fname = sanitize_filename(title) + ".png"
+    plt.savefig(fname, dpi=300)
+    plt.close()
+# %%
+# ============================================================
+# Aircraft-level Monte‑Carlo
+# ============================================================
+
+# Build parameters for all L2 components
+all_params = [
+    make_pert_params(c["target"], c["neg_unc"], c["pos_unc"])
+    for c in components
+]
+
+# Run Monte‑Carlo
+aircraft_samples = run_monte_carlo(all_params, N_SAMPLES)
+
+# ------------------------------------------------------------
+# Aircraft-level PDF
+# ------------------------------------------------------------
+def plot_aircraft_pdf(samples, title):
+    plt.figure(figsize=(10, 6))
+
+    # Histogram
+    plt.hist(samples, bins=200, density=True, alpha=0.5, label="Histogram")
+
+    # KDE curve (Kernel density estimation is a way to estimate the PDF in a non-parametric way)
+    kde = _scipy_gaussian_kde(samples)
+    xs = np.linspace(samples.min(), samples.max(), 400)
+    plt.plot(xs, kde(xs), "r-", lw=2, label="KDE")
+
+    # Percentiles
+    percentiles = [25, 50, 75, 95]
+    values = np.percentile(samples, percentiles)
+    colors = ["C0", "C1", "C2", "C3"]
+
+    for p, v, col in zip(percentiles, values, colors):
+        plt.axvline(v, color=col, linestyle="--", lw=1)
+
+        if kde is not None:
+            y = kde(v)
+        else:
+            y = 0
+
+        plt.plot(v, y, marker="o", color=col)
+        plt.annotate(f"P{p}: {v:.1f} kg",
+                     xy=(v, y),
+                     xytext=(5, 5),
+                     textcoords="offset points",
+                     fontsize=9,
+                     color=col)
+
+    plt.title(title)
+    plt.xlabel("Aircraft Mass [kg]")
+    plt.ylabel("Density")
+    plt.legend()
+    plt.grid(True, alpha=0.3)
+    plt.tight_layout()
+
+    fname = sanitize_filename(title) + ".png"
+    plt.savefig(fname, dpi=300)
+    plt.close()
+
+
+# ------------------------------------------------------------
+# Aircraft-level CDF
+# ------------------------------------------------------------
+def plot_aircraft_cdf(samples, title):
+
+    sorted_samples = np.sort(samples)
+    cdf = np.arange(1, len(samples) + 1) / len(samples)
+
+    plt.figure(figsize=(10, 6))
+    plt.plot(sorted_samples, cdf, "b-", lw=2)
+
+    # Percentiles P25,50,75,95
+    desired_percentiles = [25, 50, 75, 95]
+    perc_values = np.percentile(samples, desired_percentiles)
+
+    # Draw P lines
+    colors = ["C0", "C1", "C2", "C3"]
+    for p, v, col in zip(desired_percentiles, perc_values, colors):
+        y = p / 100.0
+        plt.axvline(v, color=col, linestyle="--", lw=1)
+        plt.axhline(y, color=col, linestyle=":", lw=1)
+        plt.plot(v, y, marker="o", color=col)
+        plt.annotate(f"P{p}: {v:.1f} kg",
+                     xy=(v, y),
+                     xytext=(5, 5),
+                     textcoords="offset points",
+                     fontsize=9,
+                     color=col)
+
+    # Confidence level line
+    v_des = np.percentile(samples, CONFIDENCE_LEVEL)
+    y_des = CONFIDENCE_LEVEL / 100.0
+    plt.axvline(v_des, color="k", linestyle="-", lw=1)
+    plt.axhline(y_des, color="k", linestyle="-", lw=1)
+    plt.plot(v_des, y_des, marker="s", color="k")
+    plt.annotate(
+        f"P({int(CONFIDENCE_LEVEL)}): {v_des:.1f} kg",
+        xy=(v_des, y_des),
+        xytext=(-10, 20),
+        textcoords="offset points",
+        fontsize=10,
+        color="k",
+        bbox=dict(boxstyle="round", facecolor="white", alpha=0.6)
+    )
+
+    # Target mass probability
+    prob_target = np.mean(samples <= OEM_TARGET)
+    plt.axvline(OEM_TARGET, color="k", linestyle="-", lw=1.5)
+    plt.axhline(prob_target, color="k", linestyle="--", lw=1.0)
+    plt.plot(OEM_TARGET, prob_target, marker="s", color="k")
+    plt.annotate(
+        f"P(Mass ≤ {OEM_TARGET:.0f} kg) = {prob_target:.4f}",
+        xy=(OEM_TARGET, prob_target),
+        xytext=(10, -20),
+        textcoords="offset points",
+        fontsize=10,
+        color="k",
+        bbox=dict(boxstyle="round", facecolor="white", alpha=0.6)
+    )
+
+    # Text box summary (as in original code)
+    txt_lines = [
+        f"P{p}: {val:.1f} kg"
+        for p, val in zip(desired_percentiles, perc_values)
+    ]
+    txt_lines.append(f"P{int(CONFIDENCE_LEVEL)}: {v_des:.1f} kg")
+    txt_lines.append(f"Target Mass {int(OEM_TARGET)} kg -> P = {prob_target:.4f}")
+    textbox_text = "\n".join(txt_lines)
+
+    props = dict(boxstyle="round", facecolor="wheat", alpha=0.85)
+    plt.gca().text(
+        0.02, 0.98, textbox_text,
+        transform=plt.gca().transAxes,
+        fontsize=10,
+        verticalalignment='top',
+        bbox=props
+    )
+
+    plt.title(title)
+    plt.xlabel("Mass [kg]")
+    plt.ylabel("Cumulative probability")
+    plt.grid(True, alpha=0.3)
+    plt.tight_layout()
+
+    fname = sanitize_filename(title) + ".png"
+    plt.savefig(fname, dpi=300)
+    plt.close()
+
+
+# ------------------------------------------------------------
+# Run and save aircraft plots
+# ------------------------------------------------------------
+plot_aircraft_pdf(aircraft_samples, "Aircraft Mass PDF")
+plot_aircraft_cdf(aircraft_samples, "Aircraft Mass CDF")
+
+# ------------------------------------------------------------
+# Print aircraft‑level statistics
+# ------------------------------------------------------------
+print("=== Aircraft-Level Results ===")
+pcts = [25, 50, 75, 90, 95]
+vals = np.percentile(aircraft_samples, pcts)
+for p, v in zip(pcts, vals):
+    print(f"  P{p:>2}: {v:.1f} kg")
+
+v_conf_air = np.percentile(aircraft_samples, CONFIDENCE_LEVEL)
+print(f"  P{int(CONFIDENCE_LEVEL)}: {v_conf_air:.1f} kg")
+
+prob_target = float(np.mean(aircraft_samples <= OEM_TARGET))
+prob_eis = float(np.mean(aircraft_samples <= ENTRY_INTO_SERVICE_MASS))
+
+print(f"\n  Probability(Mass ≤ Target {OEM_TARGET:.1f} kg): {prob_target:.6f}")
+print(f"  Probability(Mass ≤ EIS    {ENTRY_INTO_SERVICE_MASS:.1f} kg): {prob_eis:.6f}")
+
+mass_diff = OEM_TARGET - v_conf_air
+print("\nConclusion:")
+if mass_diff > 0:
+    print("  ✔ Target mass CAN be achieved at the required confidence level.")
+    print(f"  Available margin: {mass_diff:.1f} kg")
+else:
+    print("  ✘ Target mass CANNOT be achieved at the required confidence level.")
+    print(f"  Required cumulative L2 mass reduction: {-mass_diff:.1f} kg")
+
+print(f"All plots saved to the current directory.")
+print("\nMass simulation completed successfully.")
+#%%
+# ============================================================
+# L1B PDFs, L1B CDFs, and Component PERT Plots
+# ============================================================
+
+print("\n=== Generating L1B PDFs, CDFs, and Component-level PERT distributions ===\n")
+
+for group_name, items in by_group.items():
+
+    print(f"Processing group: {group_name} ({len(items)} components)")
+
+    # ---------------------------------------------
+    # 1) Build PERT parameters for this L1B group
+    # ---------------------------------------------
+    pert_params = [
+        make_pert_params(it["target"], it["neg_unc"], it["pos_unc"])
+        for it in items
+    ]
+
+    # Prepare component tuples for PERT plotting:
+    # (name, target_mass, neg_unc, pos_unc)
+    component_tuples = [
+        (it["name"], it["target"], it["neg_unc"], it["pos_unc"])
+        for it in items
+    ]
+
+    # ---------------------------------------------
+    # 2) Plot Component-Level PERT PDFs (multi-subplot)
+    # ---------------------------------------------
+    plot_component_pdfs(
+        component_tuples,
+        pert_params,
+        plot_name=f"{group_name} - Component PERT Distributions"
+    )
+
+    # ---------------------------------------------
+    # 3) Run L1B Monte Carlo
+    # ---------------------------------------------
+    l1b_samples = run_monte_carlo(pert_params, N_SAMPLES)
+
+    # ---------------------------------------------
+    # 4) Plot L1B PDF
+    # ---------------------------------------------
+    plot_monte_carlo_pdf(
+        l1b_samples,
+        title=f"{group_name} - Mass Distribution (L1B)"
+    )
+
+    # ---------------------------------------------
+    # 5) Plot L1B CDF
+    # ---------------------------------------------
+    plot_monte_carlo_cdf(
+        l1b_samples,
+        title=f"{group_name} - Mass CDF (L1B)"
+    )
+
+print("\nAll L1B PDFs, CDFs, and component-level PERT distributions created.\n")
+
+# %%
+# ============================================================
+# Save ALL images + a text summary of results (verbatim)
+# ============================================================
+import glob
+from datetime import datetime
+
+# Base output folder
+results_base = r"C:\development\CodeRepository\MassManagement\SimulationResults"
+
+# Create timestamped results folder
+timestamp = datetime.now().strftime("%Y-%m-%d_%H-%M-%S")
+results_folder = os.path.join(results_base, f"Results_{timestamp}")
+os.makedirs(results_folder, exist_ok=True)
+
+print(f"\nSaving all plots and results to:\n  {results_folder}\n")
+
+# ------------------------------------------------------------
+# 1) Move all PNG images generated in the working directory
+# ------------------------------------------------------------
+png_files = glob.glob("*.png")
+for f in png_files:
+    dest = os.path.join(results_folder, f)
+    try:
+        os.replace(f, dest)  # atomic move if possible
+    except Exception:
+        import shutil
+        shutil.move(f, dest)
+print(f"Saved {len(png_files)} image files.")
+
+# ------------------------------------------------------------
+# 2) Build the exact text summary (same as console output)
+# ------------------------------------------------------------
+lines = []
+lines.append("=== Aircraft-Level Results ===")
+for p, v in zip(pcts, vals):  # pcts = [25, 50, 75, 90, 95]; vals computed earlier
+    lines.append(f"  P{p}: {v:.1f} kg")
+lines.append(f"  P{int(CONFIDENCE_LEVEL)}: {v_conf_air:.1f} kg")
+lines.append("")
+lines.append(f"  Probability(Mass ≤ Target {OEM_TARGET:.1f} kg): {prob_target:.6f}")
+lines.append(f"  Probability(Mass ≤ EIS    {ENTRY_INTO_SERVICE_MASS:.1f} kg): {prob_eis:.6f}")
+lines.append("")
+lines.append("Conclusion:")
+if mass_diff > 0:
+    lines.append("  ✔ Target mass CAN be achieved at the required confidence level.")
+    lines.append(f"  Available margin: {mass_diff:.1f} kg")
+else:
+    lines.append("  ✘ Target mass CANNOT be achieved at the required confidence level.")
+    lines.append(f"  Required cumulative L2 mass reduction: {-mass_diff:.1f} kg")
+
+# Optional context lines (helpful metadata)
+lines.append("")
+lines.append(f"Sheet used: {newest_sheet}")
+lines.append(f"Saved at:   {timestamp}")
+
+summary_text = "\n".join(lines)
+
+# Print to console as well (keeps behavior consistent)
+print("\n" + summary_text + "\n")
+
+# ------------------------------------------------------------
+# 3) Write summary to UTF-8 text file
+# ------------------------------------------------------------
+summary_path = os.path.join(results_folder, "Simulation_Results.txt")
+with open(summary_path, "w", encoding="utf-8") as txt:
+    txt.write(summary_text + "\n")
+
+print("Text summary saved.")
+print("All simulation results saved successfully.\n")
