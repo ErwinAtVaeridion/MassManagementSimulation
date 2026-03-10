@@ -1,0 +1,109 @@
+%% ==================================================================== %%
+%% 	Load templates
+%% ==================================================================== %%
+\documentclass[oneside]{VAERIDION_Latex_LatexClassFile} % Load the document class file
+\bibliographystyle{VAERIDION_Latex_bibliography_style} % bib style
+
+%% ==================================================================== %%
+%% 		Key information about the document - TO BE FILLED OUT
+%% ==================================================================== %%
+% \def \documentType {Mass Status Report}
+% \def \documentNumber {XXX-XXX-XXXXX-XXXXXXX}
+% \def \revisionNumber {A}
+\def \authorName {Erwin Güther}
+\def \authorFunction {Working Student - Overall Aircraft Design}
+\def \titleDoc {Aircraft Mass Status Report}
+\def \subtitleDoc {}
+\title[\subtitleDoc]{\titleDoc} 
+
+%% ==================================================================== %%
+%% 	Load packages and set settings
+%% ==================================================================== %%
+\usepackage{pageslts}
+\usepackage{eforms}
+\usepackage{aeb_pro}
+\usepackage{multirow} 							% tables with multiple rows
+\usepackage{longtable,tabularx} 				% tables over multiple pages (nomenclature)
+\usepackage{hyphenat}
+\usepackage{siunitx} 							% hyphenation
+%\usepackage{subcaption} 						% subplots with subcaptions
+%\usetikzlibrary{arrows,calc,fit,positioning}	% controls for tikz image (thesis roadmap)
+\usepackage{enumitem} 							% reverse numbering in list (list of publications)
+\usepackage{overpic}							% overlaying of image (used for photos with vectorized text overlaid)
+\usepackage{amsmath}
+\usepackage{bm}       				  % bold-faced math expressions
+\usepackage{subfig}
+\usepackage{placeins}
+\usepackage{array}
+\usepackage{makecell}
+\usepackage{booktabs}
+\usepackage{soul}
+\usepackage{textcomp}
+\usepackage{ar}
+\usepackage{floatrow}
+\usepackage{booktabs}% http://ctan.org/pkg/booktabs
+\newcommand{\tabitem}{~~\llap{\textbullet}~~}
+\usepackage{pifont}
+\usepackage[english]{babel}
+\usepackage{array}
+%\pdfmapfile{TimesNewRomanPSMT.map}
+\newtheorem{hypothesis}{Hypothesis}
+\newtheorem{researchquestion}{Research question}
+\usepackage[export]{adjustbox}
+\usepackage{epstopdf} 
+\floatsetup{heightadjust=object}
+\floatsetup[table]{capposition=top}
+\setlength{\headheight}{35pt}
+\sloppy
+\DeclareCaptionLabelFormat{r-parens}{#2)} % custom caption label
+\captionsetup[sub]{              % The subcaption settings
+	font=footnotesize,           % Make the font smaller for both label and text
+	labelformat=r-parens,		 % Use our custom label format
+	justification=justified}     % left align   
+
+% define hyphen in mathmode
+\mathchardef\mhyphen="2D
+
+%change footnotes to symbols
+\newcommand\sbullet[1][.5]{\mathbin{\vcenter{\hbox{\scalebox{#1}{$\bullet$}}}}}
+\renewcommand{\thefootnote}{\fnsymbol{footnote}}
+\newcolumntype{M}[1]{>{\centering\arraybackslash}m{#1}}
+\OpenAction{/S/JavaScript/JS(this.dirty=false;)}
+\author{\authorName}{} %The author name will end up in the metadata of the final PDF.
+
+%% ==================================================================== %%
+%%  Document: Initial contents
+%% ==================================================================== %%
+\begin{document}
+\raggedbottom
+\mainmatter % Use Roman numerals for the page numbers of the title pages and table of contents.
+\include{titlePage/titlePage}
+% \include{revisionSheet/revisionSheet}
+% \include{documentApprovals/documentApprovals}
+% \renewcommand{\contentsname}{Table of Contents}
+% {
+% 	\hypersetup{linkcolor=black}
+% 	\tableofcontents
+% }
+%\pdfbookmark[0]{Table of Contents}{table} % add bookmark to PDF
+%\cleardoublepage
+% \include{nomenclature/nomenclature}						
+% \include{definitions/definitions}	
+% \bibliography{VAERIDION_Latex_bibliography}  			% bibliography file				
+% \include{summary/summary} 	
+%\thumbtrue 		
+
+%\cleardoublepage
+% Turn on thumb indices.
+% \include{purposeScope/purposeScope}			% {ch:introduction}
+%% ==================================================================== %%
+%%  Document: Main contents
+%% ==================================================================== %%
+\include{Chapter1/Chapter1}	
+% \include{Chapter2/Chapter2}			
+% \include{conclusions/conclusions}
+% \include{appendices/appendix}
+% \include{attachments/attachments}
+%\thumbfalse
+
+\end{document}

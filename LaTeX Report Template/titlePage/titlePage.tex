@@ -1,0 +1,80 @@
+\begin{titlepage}
+
+\cleardoublepage
+\begin{center}
+
+%% The following lines repeat the previous page exactly.
+
+\vspace*{2\bigskipamount}
+\vspace*{2\bigskipamount}
+\vspace*{2\bigskipamount}
+\vspace*{2\bigskipamount}
+\vspace*{2\bigskipamount}
+\vspace*{2\bigskipamount}
+\vspace*{2\bigskipamount}
+
+%% Print the title.
+{\makeatletter
+\titlestyle\Huge\@title
+\makeatother\par}
+
+%% Print the optional subtitle.
+{\makeatletter
+\ifx\@subtitle\undefined\else
+    \bigskip
+    \titlefont\titleshape\Large\@subtitle
+\fi
+\makeatother}
+
+%% Uncomment the following lines to insert a vertically centered picture into
+%% the title page.
+%\vfill
+%\includegraphics{title}
+\bigskip
+\bigskip
+\bigskip
+\bigskip
+\bigskip\bigskip
+
+
+
+\bigskip\bigskip
+
+\bigskip
+\bigskip\bigskip
+\bigskip\bigskip
+\bigskip
+
+\bigskip\bigskip
+\bigskip
+
+
+\bigskip\bigskip
+
+\vspace*{2\bigskipamount}
+
+\end{center}
+
+\bigskip
+
+%\today 
+
+\vspace*{2\bigskipamount}
+
+% Push the signature/date block to the bottom of the page
+\vfill
+
+% Signature (left) and date (right), aligned on the same baseline
+\noindent
+\begin{minipage}[t]{0.6\textwidth}
+  % Signature line (dotted) with an optional label below
+  \makebox[\linewidth][l]{\dotfill}\\[-0.6ex]
+  \textit{Signature} \hspace{1em} (\authorName)
+\end{minipage}%
+\hfill
+\begin{minipage}[t]{0.35\textwidth}
+  \raggedleft
+  \today
+\end{minipage}
+
+\end{titlepage}

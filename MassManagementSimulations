@@ -13,10 +13,17 @@ Author: Erwin @ VÆRIDION
 """
 
 #%%
+# Controls
+L1B_simulations_exports = False
+
+#%%
 # -----------------------------
 # Imports
 # -----------------------------
-import os
+import os, io, shutil, glob
+import re
+import subprocess
+from typing import Sequence
 import re
 import math
 import numpy as np
@@ -24,8 +31,8 @@ import pandas as pd
 import matplotlib
 matplotlib.use("Agg")
 import matplotlib.pyplot as plt
-
 from pathlib import Path
+from datetime import datetime
 
 # Use SciPy if available
 from scipy.stats import beta as _scipy_beta
@@ -40,7 +47,7 @@ N_SAMPLES = 500_000
 RNG = np.random.default_rng(42)
 
 # Expected L1B group names in Column B near a "Level 1B" row
-EXPECTED_GROUPS = {"Design Margin", "Vehicle Systems", "Airframe", "Propulsion"}
+EXPECTED_GROUPS = {"Design Margin", "Oil and Op. Liquids", "Vehicle Systems", "Airframe", "Propulsion"}
 
 # -----------------------------
 # Excel import (raw matrix)
@@ -80,7 +87,7 @@ print(f"Loaded newest sheet: {newest_sheet}\n")
 # Utilities
 # -----------------------------
 def to_float(x, default=0.0):
-    """Coerce x to float, returning default if NaN/None/''."""
+    """Change x to float, returning default if NaN/None/''."""
     try:
         if pd.isna(x):
             return default
@@ -96,9 +103,9 @@ def to_float(x, default=0.0):
 def sanitize_filename(name: str) -> str:
     """Create safe filenames from titles/group names."""
     name = (name or "").strip()
-    name = re.sub(r"[^\w\s\-\._]+", "", name, flags=re.UNICODE)
+    name = re.sub(r"[^\w\s\-._]+", "", name)  # '+' outside the class
     name = re.sub(r"\s+", "_", name)
-    return name[:120] if len(name) > 120 else name
+    return name[:120]
 
 # -----------------------------
 # Top-level aircraft inputs
@@ -126,9 +133,9 @@ print(f"Payload                     : {DESIRED_PAYLOAD:.1f} kg")
 print(f"Aircraft mass limit (OEM)   : {AIRCRAFT_MASS_LIMIT:.1f} kg")
 print(f"In-service mass growth      : {IN_SERVICE_MASS_GROWTH:.1f} kg")
 print(f"Entry-into-service mass     : {ENTRY_INTO_SERVICE_MASS:.1f} kg")
-print(f"OEM target mass             : {OEM_TARGET:.1f} kg  (with {APPLICABLE_MASS_MARGIN_PCT:.1f}% margin)")
-print(f"Confidence level            : P{CONFIDENCE_LEVEL:.0f}\n")
-print(f"Mass margin from sheet: {APPLICABLE_MASS_MARGIN_PCT:.1f}%\n")
+print(f"Aircraft target mass (OEM)  : {OEM_TARGET:.1f} kg  (with {APPLICABLE_MASS_MARGIN_PCT:.1f}% margin)")
+print(f"Confidence level            : {CONFIDENCE_LEVEL:.0f}\n")
+print(f"Mass margin from sheet      : {APPLICABLE_MASS_MARGIN_PCT:.1f}%\n")
 
 
 # -----------------------------
@@ -160,12 +167,11 @@ def find_group_name_around(df, i, max_lookahead=6):
 # B: Title
 # C: Basic Mass
 # D: MGA
-# E: Predicted (ignored)
+# E: Predicted
 # F: + Uncertainty
 # G: - Uncertainty
-# H: RDF
 
-components = []  # dicts: {group, name, basic, mga, pos_unc, neg_unc, rdf, target}
+components = []  # dicts: {group, name, basic, mga, predicted, pos_unc, neg_unc}
 
 current_group = None
 for i in range(len(df)):
@@ -187,25 +193,19 @@ for i in range(len(df)):
         # CORRECTED COLUMN MAPPING
         # -----------------------------
         basic = to_float(df.iloc[i, 2], 0.0)     # Column C → Basic Mass
-        mga   = to_float(df.iloc[i, 3], 0.0)     # Column D → MGA
+        mga = to_float(df.iloc[i, 3], 0.0)       # Column D → MGA
+        predicted = to_float(df.iloc[i, 4], 0.0) # Column E → Predicted mass (preferred mode)
         pos_unc = to_float(df.iloc[i, 5], 0.0)   # Column F → Positive uncertainty
         neg_unc = to_float(df.iloc[i, 6], 0.0)   # Column G → Negative uncertainty
-        rdf     = to_float(df.iloc[i, 7], 1.0)   # Column H → RDF
-
-        # Mass target (as in original logic)
-        if rdf == 0:
-            rdf = 1.0
-        target = (basic + mga) * rdf
 
         components.append({
             "group": current_group if current_group else "Unknown",
             "name": name.strip(),
             "basic": basic,
             "mga": mga,
+            "predicted": predicted,
             "pos_unc": abs(pos_unc),
             "neg_unc": -abs(neg_unc),
-            "rdf": rdf,
-            "target": target
         })
 
 # Regroup components into L1B groups
@@ -227,12 +227,11 @@ def build_group_table(items):
     for it in items:
         rows.append({
             "Title": it["name"],
-            "Basic [kg]": it["basic"],
-            "MGA [kg]": it["mga"],
-            "+Unc [kg]": it["pos_unc"],
-            "-Unc [kg]": it["neg_unc"],
-            "RDF": it["rdf"],
-            "Target = (Basic+MGA)*RDF [kg]": it["target"],
+            "Basic [kg]": it.get("basic", 0.0),
+            "MGA [kg]": it.get("mga", 0.0),
+            "Predicted [kg]": it.get("predicted", 0.0),
+            "+Unc [kg]": it.get("pos_unc", 0.0),
+            "-Unc [kg]": it.get("neg_unc", 0.0),
         })
     return pd.DataFrame(rows)
 
@@ -249,18 +248,18 @@ for group_name, items in by_group.items():
 # -----------------------------
 # PERT distribution core
 # -----------------------------
-def make_pert_params(target, neg, pos, weight=4.0):
+def make_pert_params(predicted_mass, neg, pos, weight=4.0):
     """
-    Build parameters for a PERT-like Beta on [a,b] with mode m=target.
-      a = max(target + neg, 0)  # clamp to zero (physical sanity)
-      b = max(target + pos, 0)
+    Build parameters for a PERT-like Beta on [a,b] with mode m=predicted_mass.
+      a = max(predicted_mass + neg, 0)  # clamp to zero (physical sanity)
+      b = max(predicted_mass + pos, 0)
     If a == b -> degenerate (fixed) value.
     Returns:
       - (None, a, b, m) if degenerate (fixed)
       - (a, b, alpha, beta_param, m) otherwise
     """
-    a = target + neg
-    b = target + pos
+    a = predicted_mass + neg
+    b = predicted_mass + pos
 
     # Physical constraint: mass cannot be negative
     a = max(a, 0.0)
@@ -272,7 +271,7 @@ def make_pert_params(target, neg, pos, weight=4.0):
         return (None, a, b, m)
 
     # Keep mode inside [a,b]
-    m = np.clip(target, a, b)
+    m = np.clip(predicted_mass, a, b)
     scale = b - a
     alpha = 1.0 + weight * (m - a) / scale
     beta_param = 1.0 + weight * (b - m) / scale
@@ -307,7 +306,7 @@ def plot_component_pdfs(components, pert_params, plot_name="Input Components"):
     - 2 columns
     - shaded PDFs
     - min/max markers
-    - mode (target) line
+    - mode (predicted_mass) line
     - titles and grid
     - saved to PNG
     """
@@ -318,7 +317,9 @@ def plot_component_pdfs(components, pert_params, plot_name="Input Components"):
     ncols = 2
     nrows = int(np.ceil(n / ncols))
 
-    fig, axes = plt.subplots(nrows, ncols, figsize=(12, 3.5 * nrows), squeeze=False)
+    # Reduce height by 10% to avoid spilling into PDF footer
+    fig_height = 3.5 * nrows * 0.90
+    fig, axes = plt.subplots(nrows, ncols, figsize=(12, fig_height), squeeze=False)
 
     for idx, (name, t, d, u) in enumerate(components):
         r = idx // ncols
@@ -350,7 +351,7 @@ def plot_component_pdfs(components, pert_params, plot_name="Input Components"):
             ax.plot(b, 0, marker="o", color="red", markersize=5)
             ax.text(b, 0, f"{b:.1f}", ha="left", va="bottom", fontsize=8)
 
-            # Mode / target line
+            # Mode / Predicted Mass
             ax.axvline(t, color="k", linestyle=":", lw=1.5, label=f"Predicted: {t:.1f}")
             ax.text(t, ax.get_ylim()[1]*0.95, f"{t:.1f}",
                     ha="center", va="top", fontsize=8, color="k")
@@ -382,37 +383,34 @@ def plot_monte_carlo_pdf(samples, title):
         return
 
     plt.figure(figsize=(10, 6))
+
+    # Detect deterministic distribution (zero variance)
+    if np.var(samples) == 0:
+        val = float(samples[0])
+        plt.axvline(val, color="red", linestyle="--", lw=2, label=f"Deterministic mass = {val:.1f} kg")
+        plt.title(title + " (Deterministic distribution)")
+        plt.xlabel("Mass [kg]")
+        plt.ylabel("Density")
+        plt.legend()
+        plt.grid(True, alpha=0.3)
+        plt.tight_layout()
+        plt.savefig(sanitize_filename(title) + ".png", dpi=300)
+        plt.close()
+        return
+
+    # Normal case (non-zero variance)
     plt.hist(samples, bins=200, density=True, alpha=0.5, label="Histogram")
 
     kde = _scipy_gaussian_kde(samples)
     xs = np.linspace(samples.min(), samples.max(), 400)
     plt.plot(xs, kde(xs), "r-", lw=2, label="KDE")
-
-    # Percentile lines
-    percentiles = [25, 50, 75]
-    values = np.percentile(samples, percentiles)
-    colors = ["C0", "C1", "C2"]
-
-    for p, v, col in zip(percentiles, values, colors):
-        plt.axvline(v, color=col, linestyle="--", lw=1)
-        y = kde(v)
-        plt.plot(v, y, marker="o", color=col)
-        plt.annotate(f"P{p}: {v:.1f} kg",
-                     xy=(v, y),
-                     xytext=(5, 5),
-                     textcoords="offset points",
-                     fontsize=9,
-                     color=col)
-
     plt.title(title)
     plt.xlabel("Mass [kg]")
     plt.ylabel("Density")
     plt.legend()
     plt.grid(True, alpha=0.3)
     plt.tight_layout()
-
-    fname = sanitize_filename(title) + ".png"
-    plt.savefig(fname, dpi=300)
+    plt.savefig(sanitize_filename(title) + ".png", dpi=300)
     plt.close()
 
 def plot_monte_carlo_cdf(samples, title):
@@ -420,35 +418,32 @@ def plot_monte_carlo_cdf(samples, title):
         return
 
     sorted_samples = np.sort(samples)
-    cdf = np.arange(1, len(samples) + 1) / len(samples)
 
+    # If deterministic: CDF is a vertical jump at the single mass value
+    if np.var(samples) == 0:
+        val = float(sorted_samples[0])
+        plt.figure(figsize=(10, 6))
+        plt.plot([val, val], [0, 1], "r-", lw=2, label=f"Deterministic mass = {val:.1f} kg")
+        plt.title(title + " (Deterministic distribution)")
+        plt.xlabel("Mass [kg]")
+        plt.ylabel("Cumulative probability")
+        plt.grid(True, alpha=0.3)
+        plt.tight_layout()
+        plt.savefig(sanitize_filename(title) + ".png", dpi=300)
+        plt.close()
+        return
+
+    # Normal case
+    cdf = np.arange(1, len(samples) + 1) / len(samples)
     plt.figure(figsize=(10, 6))
     plt.plot(sorted_samples, cdf, "b-", lw=2)
 
-    percentiles = [25, 50, 75]
-    values = np.percentile(sorted_samples, percentiles)
-    colors = ["C0", "C1", "C2"]
-
-    for p, v, col in zip(percentiles, values, colors):
-        y = p / 100.0
-        plt.axvline(v, color=col, linestyle="--", lw=1)
-        plt.axhline(y, color=col, linestyle=":", lw=1)
-        plt.plot(v, y, marker="o", color=col)
-        plt.annotate(f"P{p}: {v:.1f} kg",
-                     xy=(v, y),
-                     xytext=(5, 5),
-                     textcoords="offset points",
-                     fontsize=9,
-                     color=col)
-
     plt.title(title)
     plt.xlabel("Mass [kg]")
-    plt.ylabel("Cumulative Probability")
+    plt.ylabel("Cumulative probability")
     plt.grid(True, alpha=0.3)
     plt.tight_layout()
-
-    fname = sanitize_filename(title) + ".png"
-    plt.savefig(fname, dpi=300)
+    plt.savefig(sanitize_filename(title) + ".png", dpi=300)
     plt.close()
 # %%
 # ============================================================
@@ -457,7 +452,7 @@ def plot_monte_carlo_cdf(samples, title):
 
 # Build parameters for all L2 components
 all_params = [
-    make_pert_params(c["target"], c["neg_unc"], c["pos_unc"])
+    make_pert_params(c["predicted"], c["neg_unc"], c["pos_unc"])
     for c in components
 ]
 
@@ -476,7 +471,7 @@ def plot_aircraft_pdf(samples, title):
     # KDE curve (Kernel density estimation is a way to estimate the PDF in a non-parametric way)
     kde = _scipy_gaussian_kde(samples)
     xs = np.linspace(samples.min(), samples.max(), 400)
-    plt.plot(xs, kde(xs), "r-", lw=2, label="KDE")
+    plt.plot(xs, kde(xs), "r-", lw=2, label="Kernel Dnesity Estimation (KDE)")
 
     # Percentiles
     percentiles = [25, 50, 75, 95]
@@ -500,7 +495,7 @@ def plot_aircraft_pdf(samples, title):
                      color=col)
 
     plt.title(title)
-    plt.xlabel("Aircraft Mass [kg]")
+    plt.xlabel("Mass [kg]")
     plt.ylabel("Density")
     plt.legend()
     plt.grid(True, alpha=0.3)
@@ -557,13 +552,13 @@ def plot_aircraft_cdf(samples, title):
     )
 
     # Target mass probability
-    prob_target = np.mean(samples <= OEM_TARGET)
+    prob_aircraft_mass_target = np.mean(samples <= OEM_TARGET)
     plt.axvline(OEM_TARGET, color="k", linestyle="-", lw=1.5)
-    plt.axhline(prob_target, color="k", linestyle="--", lw=1.0)
-    plt.plot(OEM_TARGET, prob_target, marker="s", color="k")
+    plt.axhline(prob_aircraft_mass_target, color="k", linestyle="--", lw=1.0)
+    plt.plot(OEM_TARGET, prob_aircraft_mass_target, marker="s", color="k")
     plt.annotate(
-        f"P(Mass ≤ {OEM_TARGET:.0f} kg) = {prob_target:.4f}",
-        xy=(OEM_TARGET, prob_target),
+        f"P(Mass ≤ {OEM_TARGET:.0f} kg) = {prob_aircraft_mass_target:.4f}",
+        xy=(OEM_TARGET, prob_aircraft_mass_target),
         xytext=(10, -20),
         textcoords="offset points",
         fontsize=10,
@@ -577,7 +572,7 @@ def plot_aircraft_cdf(samples, title):
         for p, val in zip(desired_percentiles, perc_values)
     ]
     txt_lines.append(f"P{int(CONFIDENCE_LEVEL)}: {v_des:.1f} kg")
-    txt_lines.append(f"Target Mass {int(OEM_TARGET)} kg -> P = {prob_target:.4f}")
+    txt_lines.append(f"Target Mass {int(OEM_TARGET)} kg -> P = {prob_aircraft_mass_target:.4f}")
     textbox_text = "\n".join(txt_lines)
 
     props = dict(boxstyle="round", facecolor="wheat", alpha=0.85)
@@ -603,8 +598,8 @@ def plot_aircraft_cdf(samples, title):
 # ------------------------------------------------------------
 # Run and save aircraft plots
 # ------------------------------------------------------------
-plot_aircraft_pdf(aircraft_samples, "Aircraft Mass PDF")
-plot_aircraft_cdf(aircraft_samples, "Aircraft Mass CDF")
+plot_aircraft_pdf(aircraft_samples, "Aircraft Operating Empty Mass PDF")
+plot_aircraft_cdf(aircraft_samples, "Aircraft Operating Empty Mass CDF")
 
 # ------------------------------------------------------------
 # Print aircraft‑level statistics
@@ -618,10 +613,10 @@ for p, v in zip(pcts, vals):
 v_conf_air = np.percentile(aircraft_samples, CONFIDENCE_LEVEL)
 print(f"  P{int(CONFIDENCE_LEVEL)}: {v_conf_air:.1f} kg")
 
-prob_target = float(np.mean(aircraft_samples <= OEM_TARGET))
+prob_aircraft_mass_target = float(np.mean(aircraft_samples <= OEM_TARGET))
 prob_eis = float(np.mean(aircraft_samples <= ENTRY_INTO_SERVICE_MASS))
 
-print(f"\n  Probability(Mass ≤ Target {OEM_TARGET:.1f} kg): {prob_target:.6f}")
+print(f"\n  Probability(Mass ≤ Target {OEM_TARGET:.1f} kg): {prob_aircraft_mass_target:.6f}")
 print(f"  Probability(Mass ≤ EIS    {ENTRY_INTO_SERVICE_MASS:.1f} kg): {prob_eis:.6f}")
 
 mass_diff = OEM_TARGET - v_conf_air
@@ -637,61 +632,60 @@ print(f"All plots saved to the current directory.")
 print("\nMass simulation completed successfully.")
 #%%
 # ============================================================
-# L1B PDFs, L1B CDFs, and Component PERT Plots
+# L1B: always create Component-level PERT plots; optionally export L1B PDFs/CDFs
 # ============================================================
 
-print("\n=== Generating L1B PDFs, CDFs, and Component-level PERT distributions ===\n")
-
+# 1) Always generate the Component-level PERT distributions for the Appendix
+print("\n=== Generating Component-level PERT distributions for Appendix ===\n")
 for group_name, items in by_group.items():
+    if not items:
+        continue
+    # Build PERT parameters for plotting (no heavy Monte Carlo here)
+    # Special-case: split Vehicle Systems into two images so they fit page width.
+    if group_name == "Vehicle Systems" and len(items) > 1:
+        half = len(items) // 2
+        first_items = items[:half]
+        second_items = items[half:]
 
-    print(f"Processing group: {group_name} ({len(items)} components)")
+        for idx, part in enumerate((first_items, second_items), start=1):
+            if not part:
+                continue
+            pert_params_part = [make_pert_params(it["predicted"], it["neg_unc"], it["pos_unc"]) for it in part]
+            component_tuples_part = [(it["name"], it["predicted"], it["neg_unc"], it["pos_unc"]) for it in part]
+            plot_component_pdfs(
+                component_tuples_part,
+                pert_params_part,
+                plot_name=f"{group_name} - Component PERT Distributions - Part {idx}"
+            )
+    else:
+        pert_params = [
+            make_pert_params(it["predicted"], it["neg_unc"], it["pos_unc"]) for it in items
+        ]
 
-    # ---------------------------------------------
-    # 1) Build PERT parameters for this L1B group
-    # ---------------------------------------------
-    pert_params = [
-        make_pert_params(it["target"], it["neg_unc"], it["pos_unc"])
-        for it in items
-    ]
+        component_tuples = [(it["name"], it["predicted"], it["neg_unc"], it["pos_unc"]) for it in items]
 
-    # Prepare component tuples for PERT plotting:
-    # (name, target_mass, neg_unc, pos_unc)
-    component_tuples = [
-        (it["name"], it["target"], it["neg_unc"], it["pos_unc"])
-        for it in items
-    ]
+        plot_component_pdfs(
+            component_tuples,
+            pert_params,
+            plot_name=f"{group_name} - Component PERT Distributions"
+        )
 
-    # ---------------------------------------------
-    # 2) Plot Component-Level PERT PDFs (multi-subplot)
-    # ---------------------------------------------
-    plot_component_pdfs(
-        component_tuples,
-        pert_params,
-        plot_name=f"{group_name} - Component PERT Distributions"
-    )
+# 2) Optionally create L1B PDFs/CDFs when exports enabled
+if L1B_simulations_exports:
+    print("\n=== Generating L1B PDFs and CDFs (exports enabled) ===\n")
+    for group_name, items in by_group.items():
+        if not items:
+            continue
 
-    # ---------------------------------------------
-    # 3) Run L1B Monte Carlo
-    # ---------------------------------------------
-    l1b_samples = run_monte_carlo(pert_params, N_SAMPLES)
+        # Build PERT params and run Monte Carlo for this L1B group
+        pert_params = [make_pert_params(it["predicted"], it["neg_unc"], it["pos_unc"]) for it in items]
+        l1b_samples = run_monte_carlo(pert_params, N_SAMPLES)
 
-    # ---------------------------------------------
-    # 4) Plot L1B PDF
-    # ---------------------------------------------
-    plot_monte_carlo_pdf(
-        l1b_samples,
-        title=f"{group_name} - Mass Distribution (L1B)"
-    )
+        # Save L1B PDF and CDF plots
+        plot_monte_carlo_pdf(l1b_samples, title=f"{group_name} - Mass Distribution (L1B)")
+        plot_monte_carlo_cdf(l1b_samples, title=f"{group_name} - Mass CDF (L1B)")
 
-    # ---------------------------------------------
-    # 5) Plot L1B CDF
-    # ---------------------------------------------
-    plot_monte_carlo_cdf(
-        l1b_samples,
-        title=f"{group_name} - Mass CDF (L1B)"
-    )
-
-print("\nAll L1B PDFs, CDFs, and component-level PERT distributions created.\n")
+    print("\nAll L1B PDFs and CDFs created.\n")
 
 # %%
 # ============================================================
@@ -713,6 +707,11 @@ print(f"\nSaving all plots and results to:\n  {results_folder}\n")
 # ------------------------------------------------------------
 # 1) Move all PNG images generated in the working directory
 # ------------------------------------------------------------
+
+# Filenames for the two aircraft-level figures (match plot titles + sanitize)
+AIRCRAFT_PDF_IMG = sanitize_filename("Aircraft Operating Empty Mass PDF") + ".png"
+AIRCRAFT_CDF_IMG = sanitize_filename("Aircraft Operating Empty Mass CDF") + ".png"
+
 png_files = glob.glob("*.png")
 for f in png_files:
     dest = os.path.join(results_folder, f)
@@ -723,8 +722,22 @@ for f in png_files:
         shutil.move(f, dest)
 print(f"Saved {len(png_files)} image files.")
 
+# Additionally keep a copy of all images outside the LaTeX build in a dedicated
+# `figures` folder next to the timestamped results. This ensures images are
+# available independently of the report build tree.
+figures_dir = os.path.join(results_folder, "figures")
+os.makedirs(figures_dir, exist_ok=True)
+moved_pngs = list(Path(results_folder).glob("*.png"))
+for img in moved_pngs:
+    try:
+        shutil.copy2(str(img), os.path.join(figures_dir, img.name))
+    except Exception:
+        # best-effort: continue if a single copy fails
+        pass
+print(f"Also copied {len(moved_pngs)} images to: {figures_dir}")
+
 # ------------------------------------------------------------
-# 2) Build the exact text summary (same as console output)
+# 2) Build the exact text summary 
 # ------------------------------------------------------------
 lines = []
 lines.append("=== Aircraft-Level Results ===")
@@ -732,7 +745,7 @@ for p, v in zip(pcts, vals):  # pcts = [25, 50, 75, 90, 95]; vals computed earli
     lines.append(f"  P{p}: {v:.1f} kg")
 lines.append(f"  P{int(CONFIDENCE_LEVEL)}: {v_conf_air:.1f} kg")
 lines.append("")
-lines.append(f"  Probability(Mass ≤ Target {OEM_TARGET:.1f} kg): {prob_target:.6f}")
+lines.append(f"  Probability(Mass ≤ Target {OEM_TARGET:.1f} kg): {prob_aircraft_mass_target:.6f}")
 lines.append(f"  Probability(Mass ≤ EIS    {ENTRY_INTO_SERVICE_MASS:.1f} kg): {prob_eis:.6f}")
 lines.append("")
 lines.append("Conclusion:")
@@ -753,12 +766,510 @@ summary_text = "\n".join(lines)
 # Print to console as well (keeps behavior consistent)
 print("\n" + summary_text + "\n")
 
-# ------------------------------------------------------------
-# 3) Write summary to UTF-8 text file
-# ------------------------------------------------------------
-summary_path = os.path.join(results_folder, "Simulation_Results.txt")
-with open(summary_path, "w", encoding="utf-8") as txt:
-    txt.write(summary_text + "\n")
+# %% ===========================
+# PDF generation
+# ===========================
 
-print("Text summary saved.")
-print("All simulation results saved successfully.\n")
+# -- Template configuration (source is read-only; we copy per run)
+TEMPLATE_ROOT   = Path(r"C:\development\CodeRepository\MassManagement\LaTeX Report Template")
+PDF_TEX_DIR     = Path(results_folder) / ".tex files for pdf"  # results_folder defined earlier
+REPORT_TEX      = PDF_TEX_DIR / "report.tex"
+CHAPTER_DIR     = PDF_TEX_DIR / "Chapter1"
+CHAPTER_TEX     = CHAPTER_DIR / "Chapter1.tex"                # file directly under Chapter1
+
+# --- Ensure siunitx is loaded in the LaTeX preamble ---
+# (Place this right after: REPORT_TEX = PDF_TEX_DIR / "report.tex")
+template_report = TEMPLATE_ROOT / "report.tex"
+if template_report.exists():
+    # Read the template's report.tex (the copy into the results folder happens later).
+    txt = template_report.read_text(encoding="utf-8")
+
+    if "\\usepackage{siunitx}" not in txt:
+        # Insert \usepackage{siunitx} right after \documentclass line in the template
+        import re
+        new_txt, n = re.subn(
+            r"(\\documentclass(?:\[[^\]]*\])?\{[^}]+\}\s*)",
+            r"\1% Added by Mass Management script\\n\\usepackage{siunitx}\\n\\sisetup{detect-all=true}\\n",
+            txt,
+            count=1,
+            flags=re.MULTILINE,
+        )
+        if n == 0:
+            # Fallback: prepend to the file if \documentclass was not matched
+            new_txt = "% Added by Mass Management script\\n\\usepackage{siunitx}\\n\\sisetup{detect-all=true}\\n" + txt
+        template_report.write_text(new_txt, encoding="utf-8")
+else:
+    # Template missing: let the strict checks later raise a helpful error.
+    pass
+
+# -- 0) Strict preflight: the template must contain these items (no fallbacks)
+required_in_template = [
+    TEMPLATE_ROOT / "report.tex",
+    TEMPLATE_ROOT / "VAERIDION_Latex_LatexClassFile.cls",
+    TEMPLATE_ROOT / "VAERIDION_Latex_bibliography_style.bst",
+    TEMPLATE_ROOT / "titlePage" / "titlePage.tex",
+    TEMPLATE_ROOT / "Chapter1",
+    TEMPLATE_ROOT / "Chapter1" / "Chapter1.tex",
+    TEMPLATE_ROOT / "Chapter1" / "figures",
+]
+missing_template_items = [str(p) for p in required_in_template if not p.exists()]
+if missing_template_items:
+    raise FileNotFoundError(
+        "LaTeX template is incomplete. Missing the following required items:\n  - " +
+        "\n  - ".join(missing_template_items)
+    )
+
+# -- 1) Copy template into results\.tex files for pdf
+PDF_TEX_DIR.mkdir(parents=True, exist_ok=True)
+shutil.copytree(TEMPLATE_ROOT, PDF_TEX_DIR, dirs_exist_ok=True)
+
+# Verify destination tree (strict)
+REPORT_TEX      = PDF_TEX_DIR / "report.tex"
+TITLEPAGE_TEX   = PDF_TEX_DIR / "titlePage" / "titlePage.tex"
+CHAPTER_DIR     = PDF_TEX_DIR / "Chapter1"
+CHAPTER_TEX     = CHAPTER_DIR / "Chapter1.tex"
+
+# -- 1b) Ensure Chapter1/figures exists and move the two aircraft images into it
+CHAPTER_FIGURES_DIR = CHAPTER_DIR / "figures"
+CHAPTER_FIGURES_DIR.mkdir(parents=True, exist_ok=True)
+
+# The two aircraft images were moved earlier to results_folder (root).
+src_pdf = Path(results_folder) / AIRCRAFT_PDF_IMG
+src_cdf = Path(results_folder) / AIRCRAFT_CDF_IMG
+
+# Destination inside the LaTeX build tree
+dst_pdf = CHAPTER_FIGURES_DIR / AIRCRAFT_PDF_IMG
+dst_cdf = CHAPTER_FIGURES_DIR / AIRCRAFT_CDF_IMG
+
+# Move (replace if present) so LaTeX will find them
+for src, dst in [(src_pdf, dst_pdf), (src_cdf, dst_cdf)]:
+    if not src.exists():
+        print(f"Note: aircraft-level image not found (will be omitted from PDF): {src}")
+        continue
+    if dst.exists():
+        dst.unlink()
+    shutil.move(str(src), str(dst))
+
+# Move any remaining PNGs (L1B group figures) into the Chapter1 figures folder
+for f in Path(results_folder).glob("*.png"):
+    if f.name in [AIRCRAFT_PDF_IMG, AIRCRAFT_CDF_IMG]:
+        continue
+    dst = CHAPTER_FIGURES_DIR / f.name
+    if dst.exists():
+        dst.unlink()
+    shutil.move(str(f), str(dst))
+
+required_in_dest = [
+    REPORT_TEX,
+    TITLEPAGE_TEX,
+    PDF_TEX_DIR / "VAERIDION_Latex_LatexClassFile.cls",
+    PDF_TEX_DIR / "VAERIDION_Latex_bibliography_style.bst",
+    CHAPTER_DIR,
+    CHAPTER_TEX,   # will be overwritten
+]
+missing_dest_items = [str(p) for p in required_in_dest if not p.exists()]
+if missing_dest_items:
+    raise FileNotFoundError(
+        "Copied LaTeX template is incomplete. Missing the following required items in build folder:\n  - " +
+        "\n  - ".join(missing_dest_items)
+    )
+
+
+# -- 2) Helpers for LaTeX text  (replace your current _LATEX_REPLACEMENTS with this) --
+_LATEX_REPLACEMENTS = [
+    ("\\", r"\textbackslash{}"),
+    ("{", r"\{"), ("}", r"\}"),
+    ("$", r"\$"), ("&", r"\&"), ("#", r"\#"),
+    ("_", r"\_"),  # <-- underscore itself, not the sequence "\_"
+    ("%", r"\%"),
+    ("~", r"\textasciitilde{}"),
+    ("^", r"\textasciicircum{}"),
+]
+def tex_escape(s: str) -> str:
+    if s is None:
+        return ""
+    # Preserve comparison symbols as LaTeX math after escaping other characters.
+    if s is None:
+        return ""
+    out = str(s)
+    # Temporarily protect unicode comparison symbols with tokens that won't be escaped
+    out = out.replace("≤", "<<<LE>>>").replace("≥", "<<<GE>>>")
+
+    # Apply replacements except underscore (handle underscore last to avoid clobbering tokens)
+    for a, b in _LATEX_REPLACEMENTS:
+        if a == "_":
+            continue
+        out = out.replace(a, b)
+
+    # Reinsert as math constructs so LaTeX prints the symbols reliably under XeLaTeX
+    out = out.replace("<<<LE>>>", r"$\\leq$")
+    out = out.replace("<<<GE>>>", r"$\\geq$")
+
+    # Escape underscore as the final step
+    out = out.replace("_", r"\\_")
+    return out
+
+
+def sanitize_for_verbatim(s: str) -> str:
+    if s is None:
+        return ""
+    # Keep unicode comparison symbols; normalize other cosmetic characters
+    return (s
+        .replace("✓", "[OK]").replace("✔", "[OK]")
+        .replace("✗", "[FAIL]").replace("✘", "[FAIL]")
+        .replace("—", "-").replace("–", "-")
+    )
+
+def fmt_kg(x, nd=1):
+    try: return f"{float(x):.{nd}f}"
+    except: return ""
+
+def fmt_rdf(x):
+    try:
+        xv = float(x)
+        return f"{int(xv)}" if abs(xv - int(xv)) < 1e-9 else f"{xv:.3f}"
+    except: return ""
+
+# Order groups for the L2 table section
+preferred_order = ["Design Margin", "Oil and Op. Liquids", "Vehicle Systems", "Airframe", "Propulsion"]
+group_names = [g for g in preferred_order if g in by_group] + [g for g in by_group.keys() if g not in preferred_order]
+
+def make_group_tabularx_tex(group_name: str, items: list[dict]) -> str:
+    r"""
+    Render a tabularx table constrained to \textwidth.
+
+    Expected keys per item:
+      - name: str
+      - basic: float
+      - mga: float
+      - predicted: float
+      - pos_unc: float
+      - neg_unc: float
+
+    Requires LaTeX packages:
+      \usepackage{tabularx}
+      \usepackage{booktabs}
+      \usepackage{makecell}
+    """
+
+    caption_text = tex_escape(f"L2 components for {group_name}")
+
+    header = (
+        r"\toprule" + "\n"
+        r"\makecell[l]{\textbf{Title}} & "
+        r"\makecell[r]{\textbf{Basic Mass [kg]}} & "
+        r"\makecell[r]{\textbf{MGA [kg]}} & "
+        r"\makecell[r]{\textbf{Predicted [kg]}} & "
+        r"\makecell[r]{\textbf{+Unc [kg]}} & "
+        r"\makecell[r]{\textbf{-Unc [kg]}} "
+        + r"\\" + "\n"
+        r"\midrule"
+    )
+
+    rows = []
+    for it in sorted(items, key=lambda x: x.get("name", "")):
+        title     = tex_escape(it.get("name", ""))
+        basic     = fmt_kg(it.get("basic", 0.0))
+        mga       = fmt_kg(it.get("mga", 0.0))
+        predicted = fmt_kg(it.get("predicted", 0.0))
+        up        = fmt_kg(it.get("pos_unc", 0.0))
+        dn        = fmt_kg(it.get("neg_unc", 0.0))
+
+        row = f"{title} & {basic} & {mga} & {predicted} & {up} & {dn} "
+        rows.append(row + r"\\" + "\n")
+
+    body = "\n".join(rows) if rows else (
+        r"\multicolumn{6}{l}{\emph{No items in this group.}} " + r"\\" + "\n"
+    )
+
+    table = (
+        r"\begin{table}[H]" + "\n"
+        r"\centering" + "\n"
+        r"\caption{" + caption_text + r"}" + "\n"
+        r"\begin{tabularx}{\textwidth}{Xrrrrr}" + "\n"
+        + header + "\n"
+        + body +
+        r"\bottomrule" + "\n"
+        r"\end{tabularx}" + "\n"
+        r"\end{table}"
+    )
+
+    return table
+
+# -- 3) Use in-memory aircraft-level summary (no text file)
+# The summary was already assembled earlier in the run as `summary_text`.
+summary_text = sanitize_for_verbatim(summary_text)
+
+# -- 4) Build Chapter1/Chapter1.tex (NO images; only Input Data + Aircraft results)
+timestamp_str = datetime.now().strftime("%Y-%m-%d %H:%M:%S")
+buf = io.StringIO()
+buf.write("% ================== AUTO-GENERATED (do not edit manually) ==================\n")
+buf.write(f"% Generated by Mass Management Simulation on {timestamp_str}\n\n")
+buf.write(r"\chapter{Status of L2 PBS Mass Estimates}" + "\n\n")
+buf.write(r"This chapter reproduces the Level 2 (L2) component mass properties relevant at the date of generation." + "\n\n")
+
+# (0) Aircraft-level target parameters: include imported aircraft parameters
+# --- Aircraft Mass Target Parameters as a description list with siunitx ---
+buf.write(r"\section{Aircraft Mass Target Parameters}" + "\n")
+buf.write(r"\small\begin{description}" + "\n")
+
+# Helper to escape only the label (so we don't break \SI macros)
+def _label(s: str) -> str:
+    return tex_escape(s)  # you already defined tex_escape earlier
+
+buf.write(fr"\item[{_label('MTOM:')}] \SI{{{DESIRED_MTOM:.1f}}}{{\kilogram}}" + "\n")
+buf.write(fr"\item[{_label('Payload:')}] \SI{{{DESIRED_PAYLOAD:.1f}}}{{\kilogram}}" + "\n")
+buf.write(fr"\item[{_label('Aircraft mass limit (OEM):')}] \SI{{{AIRCRAFT_MASS_LIMIT:.1f}}}{{\kilogram}}" + "\n")
+buf.write(fr"\item[{_label('In-service mass growth:')}] \SI{{{IN_SERVICE_MASS_GROWTH:.1f}}}{{\kilogram}}" + "\n")
+buf.write(fr"\item[{_label('Entry-into-service mass:')}] \SI{{{ENTRY_INTO_SERVICE_MASS:.1f}}}{{\kilogram}}" + "\n")
+buf.write(fr"\item[{_label('Aircraft target mass (OEM):')}] \SI{{{OEM_TARGET:.1f}}}{{\kilogram}}" + "\n")
+
+# Keep your original 'Pxx' percentile style (not a unit)
+buf.write(fr"\item[{_label('Confidence level:')}] P{int(CONFIDENCE_LEVEL)}" + "\n")
+
+# Percentage as a proper unit
+buf.write(fr"\item[{_label('Mass margin from sheet:')}] \SI{{{APPLICABLE_MASS_MARGIN_PCT:.1f}}}{{\percent}}" + "\n")
+
+buf.write(r"\end{description}" + "\n\n")
+
+# (1) Input Data: create one section per L1B group (table + L1B simulation summary + figures)
+
+for g in group_names:
+    items = by_group.get(g, [])
+    buf.write(r"\section{" + tex_escape(g) + r"}" + "\n")
+    if items:
+        buf.write(make_group_tabularx_tex(g, items))
+        buf.write("\n")
+
+        # Compute a simple aggregated summary for this L1B group
+        try:
+            L1B_basic_mass = sum([it.get("basic", 0.0) for it in items])
+            L1B_predicted_mass = sum([it.get("predicted", 0.0) for it in items])
+            L1B_MGA = sum([it.get("mga", 0.0) for it in items])
+            pert_params = [make_pert_params(it["predicted"], it["neg_unc"], it["pos_unc"]) for it in items]
+            l1b_samples = run_monte_carlo(pert_params, N_SAMPLES) if pert_params else np.array([])
+            if l1b_samples.size > 0:
+                p5, p50, p95 = np.percentile(l1b_samples, [5, 50, 95])
+            else:
+                p5 = p50 = p95 = L1B_predicted_mass
+
+        except Exception as e:
+            print(f"Error computing L1B summary for group '{g}': {e}")
+            p5 = p50 = p95 = 0
+            L1B_basic_mass = 0
+            L1B_predicted_mass = 0
+            L1B_MGA = 0
+
+        
+        
+        # --- L1B summary (NEW): description list with siunitx, no verbatim ---
+        buf.write(r"\small\begin{description}" + "\n")
+
+        # Basic meta
+        buf.write(fr"\item[{_label('Components:')}] \num{{{len(items)}}}" + "\n")
+
+        # Mass summaries
+        buf.write(fr"\item[{_label('Total basic mass:')}] \SI{{{L1B_basic_mass:.1f}}}{{\kilogram}}" + "\n")
+        buf.write(fr"\item[{_label('Total predicted mass:')}] \SI{{{L1B_predicted_mass:.1f}}}{{\kilogram}}" + "\n")
+        buf.write(fr"\item[{_label('Total MGA:')}] \SI{{{L1B_MGA:.1f}}}{{\kilogram}}" + "\n")
+
+        # Monte Carlo stats
+        buf.write(fr"\item[{_label('Monte Carlo median (P50):')}] \SI{{{p50:.1f}}}{{\kilogram}}" + "\n")
+        buf.write(fr"\item[{_label('Uncertainty band (P5--P95):')}] "
+                fr"\SIrange{{{p5:.1f}}}{{{p95:.1f}}}{{\kilogram}}" + "\n")
+
+        buf.write(r"\end{description}" + "\n\n")
+
+        # Figure filenames (sanitized during plotting earlier)
+        # Component PERT distributions are placed in the Appendix (Level 2 PERT-Distributions)
+        l1b_pdf_img = sanitize_filename(f"{g} - Mass Distribution (L1B)") + ".png"
+        l1b_cdf_img = sanitize_filename(f"{g} - Mass CDF (L1B)") + ".png"
+
+        # Only include L1B images if they exist in the figures folder
+        l1b_pdf_path = CHAPTER_FIGURES_DIR / l1b_pdf_img
+        l1b_cdf_path = CHAPTER_FIGURES_DIR / l1b_cdf_img
+
+        if l1b_pdf_path.exists():
+            buf.write(r"\begin{figure}[H]" + "\n")
+            buf.write(r"\centering" + "\n")
+            buf.write(r"\includegraphics[width=0.9\textwidth]{Chapter1/figures/" + l1b_pdf_img.replace("\\", "/") + "}\n")
+            buf.write(r"\caption{" + tex_escape(g) + r" - Mass Distribution (L1B)}" + "\n")
+            buf.write(r"\end{figure}" + "\n\n")
+
+        if l1b_cdf_path.exists():
+            buf.write(r"\begin{figure}[H]" + "\n")
+            buf.write(r"\centering" + "\n")
+            buf.write(r"\includegraphics[width=0.9\textwidth]{Chapter1/figures/" + l1b_cdf_img.replace("\\", "/") + "}\n")
+            buf.write(r"\caption{" + tex_escape(g) + r" - Mass CDF (L1B)}" + "\n")
+            buf.write(r"\end{figure}" + "\n\n")
+    else:
+        buf.write("(no components for this group)\n\n")
+
+# (2) Aircraft mass results
+# Compute percentage values once for readability
+prob_aircraft_mass_target_pct = prob_aircraft_mass_target * 100.0  # from your earlier calc
+prob_eis_pct = prob_eis * 100.0
+
+buf.write(r"\chapter{Aircraft-Level Monte Carlo Results}" + "\n\n")
+
+# Short intro line for the chapter
+buf.write(r"This chapter shows the Monte Carloresults obtained for aircraft-level statistics." + "\n\n")
+
+# --- Summary as a clean description list (no verbatim) ---
+buf.write(r"\small\begin{description}" + "\n")
+
+# Percentiles tabled as individual items (keeps alignment simple and robust)
+for p, v in zip(pcts, vals):  # pcts = [25, 50, 75, 90, 95]
+    buf.write(fr"\item[{_label(f'P{p}:')}] \SI{{{v:.1f}}}{{\kilogram}}" + "\n")
+
+# Confidence percentile (e.g., P80) as its own item
+buf.write(fr"\item[{_label(f'P{int(CONFIDENCE_LEVEL)}:')}] \SI{{{v_conf_air:.1f}}}{{\kilogram}}" + "\n")
+
+# Probability of meeting the OEM target mass (presented as a percentage)
+buf.write(
+    fr"\item[{_label(f'Probability mass less than or equal to {int(OEM_TARGET)} kg (Aircraft target mass):')}] "
+    fr"\SI{{{prob_aircraft_mass_target_pct:.2f}}}{{\percent}}"
+    + "\n"
+)
+
+# Probability of meeting the Entry-Into-Service mass (percentage)
+buf.write(
+    fr"\item[{_label(f'Probability mass less than or equal to {int(ENTRY_INTO_SERVICE_MASS)} kg (Entry-into-service mass):')}] "
+    fr"\SI{{{prob_eis_pct:.2f}}}{{\percent}}"
+    + "\n"
+)
+
+# Show the number of Monte Carlo samples (nice for traceability)
+buf.write(fr"\item[{_label('Monte Carlo Samples:')}] \num{{{N_SAMPLES}}}" + "\n")
+
+buf.write(r"\end{description}" + "\n\n")
+
+
+# (3) Insert the PDF and CDF figures right below the summary
+# Use paths relative to report.tex (compile cwd = PDF_TEX_DIR), so prefix with 'Chapter1/figures/...'
+buf.write("\n")
+aircraft_pdf_path = CHAPTER_FIGURES_DIR / AIRCRAFT_PDF_IMG
+aircraft_cdf_path = CHAPTER_FIGURES_DIR / AIRCRAFT_CDF_IMG
+
+if aircraft_pdf_path.exists():
+    buf.write(r"\begin{figure}[H]" + "\n")
+    buf.write(r"\centering" + "\n")
+    buf.write(r"\includegraphics[width=\textwidth]{Chapter1/figures/" + AIRCRAFT_PDF_IMG.replace("\\", "/") + "}\n")
+    buf.write(r"\caption{Aircraft Operating Empty Mass PDF}" + "\n")
+    buf.write(r"\label{fig:aircraft-pdf}" + "\n")
+    buf.write(r"\end{figure}" + "\n\n")
+else:
+    buf.write("% Aircraft PDF image not present; omitted.\n\n")
+
+if aircraft_cdf_path.exists():
+    buf.write(r"\begin{figure}[H]" + "\n")
+    buf.write(r"\centering" + "\n")
+    buf.write(r"\includegraphics[width=\textwidth]{Chapter1/figures/" + AIRCRAFT_CDF_IMG.replace("\\", "/") + "}\n")
+    buf.write(r"\caption{Aircraft Operating Empty Mass CDF}" + "\n")
+    buf.write(r"\label{fig:aircraft-cdf}" + "\n")
+    buf.write(r"\end{figure}" + "\n\n")
+else:
+    buf.write("% Aircraft CDF image not present; omitted.\n\n")
+
+
+# ============================================================
+# Appendix: Level 2 PERT distributions (one section per L1B group)
+# ============================================================
+
+buf.write(r"\appendix" + "\n")
+buf.write(r"\chapter{Level 2 PERT-Distributions}" + "\n\n")
+for g in group_names:
+    buf.write(r"\section{" + tex_escape(g) + r"}" + "\n")
+    # Vehicle Systems may have been split into two parts; include both if present
+    if g == "Vehicle Systems":
+        for idx in (1, 2):
+            comp_img = sanitize_filename(f"{g} - Component PERT Distributions - Part {idx}") + ".png"
+            comp_img_path = CHAPTER_FIGURES_DIR / comp_img
+            if comp_img_path.exists():
+                buf.write(r"\begin{figure}[H]" + "\n")
+                buf.write(r"\centering" + "\n")
+                buf.write(r"\includegraphics[width=0.95\textwidth]{Chapter1/figures/" + comp_img.replace("\\", "/") + "}\n")
+                buf.write(r"\caption{Component PERT distributions for " + tex_escape(g) + r" (Part " + str(idx) + r")}" + "\n")
+                buf.write(r"\end{figure}" + "\n\n")
+            else:
+                buf.write("% Component PERT distributions image (part) not present; omitted.\n\n")
+    else:
+        comp_img = sanitize_filename(f"{g} - Component PERT Distributions") + ".png"
+        comp_img_path = CHAPTER_FIGURES_DIR / comp_img
+        if comp_img_path.exists():
+            buf.write(r"\begin{figure}[H]" + "\n")
+            buf.write(r"\centering" + "\n")
+            buf.write(r"\includegraphics[width=0.95\textwidth]{Chapter1/figures/" + comp_img.replace("\\", "/") + "}\n")
+            buf.write(r"\caption{Component PERT distributions for " + tex_escape(g) + r"}" + "\n")
+            buf.write(r"\end{figure}" + "\n\n")
+        else:
+            buf.write("% Component PERT distributions image not present for this group; omitted.\n\n")
+
+CHAPTER_TEX.write_text(buf.getvalue(), encoding="utf-8")
+print(f"Chapter written: {CHAPTER_TEX}")
+
+# -- 5) Compile with MiKTeX (XeLaTeX), not on PATH -> point to exact executable
+def find_miktex_xelatex() -> str:
+    candidates = [
+        r"C:\Program Files\MiKTeX\miktex\bin\x64\xelatex.exe",
+        r"C:\Program Files\MiKTeX\bin\x64\xelatex.exe",
+        r"C:\Program Files\MiKTeX\miktex\bin\xelatex.exe",
+        r"C:\Program Files\MiKTeX\bin\xelatex.exe",
+    ]
+    for exe in candidates:
+        if Path(exe).exists():
+            return exe
+    raise FileNotFoundError(
+        "MiKTeX 'xelatex.exe' not found under 'C:\\Program Files\\MiKTeX'.\n"
+        "Please install MiKTeX or adjust the candidate paths in find_miktex_xelatex()."
+    )
+
+xelatex = find_miktex_xelatex()
+env = os.environ.copy()
+env["PATH"] = str(Path(xelatex).parent) + os.pathsep + env.get("PATH", "")
+
+def run_xelatex(pass_idx: int) -> None:
+    cmd = [xelatex, "-interaction=nonstopmode", "-halt-on-error", "report.tex"]
+    print(f"Running xelatex pass {pass_idx}: {xelatex}")
+    proc = subprocess.run(
+        cmd,
+        cwd=str(PDF_TEX_DIR),
+        env=env,
+        stdout=subprocess.PIPE,
+        stderr=subprocess.STDOUT,
+        text=True,
+        encoding="utf-8",
+        errors="replace",
+    )
+    # Do not write LaTeX compiler output to disk; keep in-memory only.
+    print(f"xelatex pass {pass_idx} completed (compiler output captured).")
+    if proc.returncode != 0:
+        tail = "\n".join((proc.stdout or "").splitlines()[-80:])
+        raise RuntimeError(
+            f"xelatex failed on pass {pass_idx}.\n"
+            f"--- Last compiler lines ---\n{tail}\n"
+            f"--- End last lines ---\n"
+        )
+
+# Two passes for references
+run_xelatex(1)
+run_xelatex(2)
+
+pdf_out = PDF_TEX_DIR / "report.pdf"
+if not pdf_out.exists():
+    raise FileNotFoundError(f"Expected output PDF not found: {pdf_out}")
+
+# Move & rename into the simulation results folder
+current_date = datetime.now().strftime("%Y-%m-%d")
+target_pdf = Path(results_folder) / f"Aircraft_Mass_Status_Report_{current_date}.pdf"
+
+# If a file with that name already exists, replace it 
+try:
+    # Prefer a move (across volumes it becomes a copy+remove)
+    shutil.move(str(pdf_out), str(target_pdf))
+except Exception:
+    # Fallback if move fails for any reason
+    shutil.copy2(str(pdf_out), str(target_pdf))
+    pdf_out.unlink(missing_ok=True)
+
+print(f"\nLaTeX report created: {target_pdf}\n")
