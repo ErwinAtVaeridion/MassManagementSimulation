@@ -1,11 +1,12 @@
 """
 Mass Simulation with L1B and Aircraft-Level Monte Carlo Simulation
 ------------------------------------------------------------------------------
-- Imports inputs from Excel (Sheet name: "PBS Mass Estimates").
-- Identifies Level 2 rows via Column A == "Level 2".
-- Assigns L2 components to L1B groups by tracking the preceding "Level 1B" header.
+- Imports inputs from Excel (Sheet name: "Master Summary").
+- Identifies Level 3 rows via Column A == "Level 3".
+- Tracks the preceding "Level 1B" header for L1B group assignment.
+- Tracks the preceding "Level 2" header as the L2 parent context (no data extracted at L2).
 - Builds PERT distributions (target ± uncertainties) with non-negative lower bound.
-- Runs Monte Carlo for each L1B group and for the entire aircraft (combined L2).
+- Runs Monte Carlo for each L1B group and for the entire aircraft (combined L3).
 - Plotting features: component PERT PDFs, L1B PDFs/CDFs, aircraft PDFs/CDF with text boxes.
 - Prints verification tables per L1B group + summary stats and saves plots/CSV.
 
@@ -14,7 +15,8 @@ Author: Erwin @ VÆRIDION
 
 #%%
 # Controls
-L1B_simulations_exports = False
+L1B_simulations_exports = False  # Set to True to generate L1B-level PDF and CDF plots
+L2_simulations_exports = False   # Set to True to generate L2-level PDF and CDF plots
 
 #%%
 TEST_RUN = False # Set to True to skip PDF generation and delete results after the run (for testing purposes)
@@ -50,7 +52,7 @@ N_SAMPLES = 500_000
 RNG = np.random.default_rng(42)
 
 # Expected L1B group names in Column B near a "Level 1B" row
-EXPECTED_GROUPS = {"Design Margin", "Oil and Op. Liquids", "Vehicle Systems", "Airframe", "Propulsion"}
+EXPECTED_GROUPS = {"Oil and Op. Liquids", "Vehicle Systems", "Airframe", "Propulsion"}
 
 # -----------------------------
 # Excel import (raw matrix)
@@ -68,11 +70,11 @@ file_path = os.path.join(
     "Aircraft Team - 0055 Mass and Performance Management",
     "01 Mass Management Process",
     "03 Excel Spreadsheets",
-    "Mass_Analysis_Inputs.xlsx",
+    "VAER PBS Mass Properties.xlsx",
 )
 
-# --- Use the fixed sheet name 'MASS_INPUT' ---
-sheet_name = "MASS_INPUT"
+# --- Use the fixed sheet name 'Master Summary' ---
+sheet_name = "Master Summary"
 df = pd.read_excel(file_path, sheet_name=sheet_name, header=None, engine="openpyxl")
 print(f"Loaded sheet: {sheet_name}\n")
 
@@ -153,35 +155,31 @@ def find_group_name_around(df, i, max_lookahead=6):
 
 
 # -----------------------------
-# Extract L2 components with corrected mapping
+# Extract L3 components with corrected mapping
 # -----------------------------
 # dynamically locate the columns we care about by scanning
 # the first few rows of the sheet.  The idea is that the headers may
 # move around or the order may change; we only care that some cell in
 # the first 15 rows contains a recognizable keyword.
 
-# list of header names we expect exactly; the search is now
-# strict (case‑insensitive equality) rather than substring matching.
-# the five required columns are:
+# list of header names we expect exactly (case-insensitive equality).
+# the five required columns are (all populated at Level 3):
 #   Basic Mass [kg]
 #   MGA [kg]
 #   Predicted Mass [kg]
-#   Uncertainty (+) [kg]
-#   Uncertainty (-) [kg]
+#   Mass Uncertainty (+) [kg]
+#   Mass Uncertainty (-) [kg]
+# Level 2 rows carry no uncertainties or MGA; they are only used here
+# to track the L2 parent name for each L3 entry.
 # any other columns (e.g. maturity, novelty, MGA [%]) are ignored by
 # this scan.
 search_terms = {
-    "basic": ["basic mass [kg]"],
-    "mga": ["mga [kg]"],
-    "predicted": ["predicted mass [kg]"],
-    "pos_unc": ["uncertainty (+) [kg]"],
-    "neg_unc": ["uncertainty (-) [kg]"],
+    "basic":    "basic mass [kg]",
+    "mga":      "mga [kg]",
+    "predicted": "predicted mass [kg]",
+    "pos_unc":  "mass uncertainty (+) [kg]",
+    "neg_unc":  "mass uncertainty (-) [kg]",
 }
-
-# default column indices if we fail to detect anything; matches the
-# original hard‑coded layout (C=2..G=6)
-default_cols = {"basic": 2, "mga": 3, "predicted": 4,
-                "pos_unc": 5, "neg_unc": 6}
 
 # walk the first few rows looking for our keywords
 col_map = {k: None for k in search_terms}
@@ -191,29 +189,38 @@ for i in range(max_header_rows):
         if not isinstance(cell, str):
             continue
         lc = cell.strip().lower()
-        for key, terms in search_terms.items():
+        for key, expected in search_terms.items():
             if col_map[key] is not None:
-                # already found
                 continue
-            for term in terms:
-                # match on equality rather than substring
-                if lc == term:
-                    col_map[key] = j
-                    break
-            if col_map[key] is not None:
-                break
+            if lc == expected:
+                col_map[key] = j
 
-# fall back to defaults if any column was not identified
-for key, idx in col_map.items():
-    if idx is None:
-        col_map[key] = default_cols[key]
+# Raise an error immediately if any required column was not found
+missing_cols = [search_terms[k] for k, v in col_map.items() if v is None]
+if missing_cols:
+    raise ValueError(
+        f"The following required column header(s) were not found in the first "
+        f"{max_header_rows} rows of sheet '{sheet_name}':\n"
+        + "\n".join(f"  - \"{c}\"" for c in missing_cols)
+        + "\nPlease verify the column names in the Excel file."
+    )
 
-# report what we ended up using so that it's easier to troubleshoot
-print(f"Detected column indices: {col_map} (defaults used for missing headers)")
+print(f"Detected column indices: {col_map}")
 
-components = []  # dicts: {group, name, basic, mga, predicted, pos_unc, neg_unc}
+components = []  # dicts: {group, l2_parent, name, basic, mga, predicted, pos_unc, neg_unc}
+# L2-level aggregate values read directly from the spreadsheet for cross-verification.
+# key: (l1b_group, l2_name) -> {"basic": float|None, "mga": float|None, "predicted": float|None}
+l2_spreadsheet_data: dict[tuple, dict] = {}
+
+def _nf(raw):
+    """Return float value of a spreadsheet cell, or None if the cell is blank/NaN."""
+    try:
+        return None if pd.isna(raw) else to_float(raw)
+    except Exception:
+        return None
 
 current_group = None
+current_l2_name = None
 for i in range(len(df)):
     a = df.iloc[i, 0]
 
@@ -221,10 +228,25 @@ for i in range(len(df)):
     if isinstance(a, str) and a.strip() == "Level 1B":
         g = find_group_name_around(df, i)
         current_group = g or current_group
+        current_l2_name = None  # reset L2 parent when a new L1B group starts
         continue
 
-    # Process Level 2 rows
+    # Track Level 2 rows as parent context; also capture the row's aggregate mass
+    # values so they can be cross-checked against the L3 sums later.
     if isinstance(a, str) and a.strip() == "Level 2":
+        l2_name = df.iloc[i, 1]
+        if isinstance(l2_name, str) and l2_name.strip():
+            current_l2_name = l2_name.strip()
+            if current_group:
+                l2_spreadsheet_data[(current_group, current_l2_name)] = {
+                    "basic":     _nf(df.iloc[i, col_map["basic"]]),
+                    "mga":       _nf(df.iloc[i, col_map["mga"]]),
+                    "predicted": _nf(df.iloc[i, col_map["predicted"]]),
+                }
+        continue
+
+    # Process Level 3 rows
+    if isinstance(a, str) and a.strip() == "Level 3":
         name = df.iloc[i, 1]
         if not isinstance(name, str) or name.strip() == "":
             continue
@@ -240,6 +262,7 @@ for i in range(len(df)):
 
         components.append({
             "group": current_group if current_group else "Unknown",
+            "l2_parent": current_l2_name if current_l2_name else "Unknown",
             "name": name.strip(),
             "basic": basic,
             "mga": mga,
@@ -253,7 +276,7 @@ by_group = {}
 for c in components:
     by_group.setdefault(c["group"], []).append(c)
 
-print(f"Total L2 components imported: {len(components)}")
+print(f"Total L3 components imported: {len(components)}")
 for g, items in by_group.items():
     print(f"  {g}: {len(items)} components")
 print()
@@ -266,6 +289,7 @@ def build_group_table(items):
     rows = []
     for it in items:
         rows.append({
+            "L2 Parent": it.get("l2_parent", ""),
             "Title": it["name"],
             "Basic [kg]": it.get("basic", 0.0),
             "MGA [kg]": it.get("mga", 0.0),
@@ -284,6 +308,47 @@ for group_name, items in by_group.items():
     else:
         # Sort by Title for easier visual check
         print(df_tbl.sort_values("Title").to_string(index=False))
+
+# -----------------------------
+# L2 spreadsheet cross-check
+# -----------------------------
+# Compare the L3 sums per L2 system against the aggregate values stored in the
+# Level 2 rows of the spreadsheet (Basic Mass, MGA, Predicted Mass).
+# Uncertainties are only defined at L3 level and are therefore not verified here.
+VERIFICATION_TOL_KG = 0.5  # acceptable rounding discrepancy in kg
+
+verification_errors: list[str] = []
+for (grp, l2), sheet_vals in l2_spreadsheet_data.items():
+    l3_for_l2 = [c for c in components if c["group"] == grp and c["l2_parent"] == l2]
+    if not l3_for_l2:
+        continue
+    calc = {
+        "basic":     sum(it["basic"]     for it in l3_for_l2),
+        "mga":       sum(it["mga"]       for it in l3_for_l2),
+        "predicted": sum(it["predicted"] for it in l3_for_l2),
+    }
+    for field, label in (("basic", "Basic Mass"), ("mga", "MGA"), ("predicted", "Predicted Mass")):
+        sv = sheet_vals.get(field)
+        if sv is None:
+            continue  # blank cell in sheet — skip
+        diff = abs(calc[field] - sv)
+        if diff > VERIFICATION_TOL_KG:
+            verification_errors.append(
+                f"  [{grp} / {l2}]  {label}:"
+                f"  L3 sum = {calc[field]:.2f} kg,"
+                f"  sheet L2 row = {sv:.2f} kg,"
+                f"  discrepancy = {diff:.2f} kg"
+            )
+
+if verification_errors:
+    raise ValueError(
+        "L2 mass verification FAILED.\n"
+        "The following L2 rows in the spreadsheet do not match "
+        "the sum of their L3 children:\n\n"
+        + "\n".join(verification_errors)
+        + "\n\nPlease correct the discrepancies in the PBS spreadsheet before re-running."
+    )
+print(f"L2 mass verification passed ({len(l2_spreadsheet_data)} L2 systems checked).\n")
 
 # -----------------------------
 # PERT distribution core
@@ -342,78 +407,89 @@ def run_monte_carlo(params_list, n_samples=N_SAMPLES):
 # -----------------------------
 def plot_component_pdfs(components, pert_params, plot_name="Input Components"):
     """
-    Restored multi‑subplot PERT PDF plotting exactly like the original:
-    - 2 columns
-    - shaded PDFs
-    - min/max markers
-    - mode (predicted_mass) line
+    Multi‑subplot PERT PDF plotting with automatic pagination:
+    - 2 columns, max 5 rows per figure (10 components per page)
+    - shaded PDFs, min/max markers, mode (predicted_mass) line
     - titles and grid
-    - saved to PNG
+    - saved to PNG; returns list of saved filenames
     """
     n = len(components)
     if n == 0:
-        return
+        return []
 
     ncols = 2
-    nrows = int(np.ceil(n / ncols))
+    max_rows = 5
+    items_per_fig = max_rows * ncols  # 10 components per figure
 
-    # Reduce height by 10% to avoid spilling into PDF footer
-    fig_height = 3.5 * nrows * 0.90
-    fig, axes = plt.subplots(nrows, ncols, figsize=(12, fig_height), squeeze=False)
+    n_figures = int(np.ceil(n / items_per_fig))
+    saved_files = []
 
-    for idx, (name, t, d, u) in enumerate(components):
-        r = idx // ncols
-        c = idx % ncols
-        ax = axes[r][c]
+    for fig_idx in range(n_figures):
+        start = fig_idx * items_per_fig
+        end = min(start + items_per_fig, n)
+        chunk_components = components[start:end]
+        chunk_params = pert_params[start:end]
+        n_chunk = len(chunk_components)
 
-        params_idx = pert_params[idx]
+        nrows = int(np.ceil(n_chunk / ncols))
+        fig_height = 3.5 * nrows * 0.90
+        fig, axes = plt.subplots(nrows, ncols, figsize=(12, fig_height), squeeze=False)
 
-        if params_idx[0] is None:
-            # Fixed-value vertical line
-            ax.axvline(t, color="k", linestyle="--", label=f"{name} (fixed)")
-            ax.plot(t, 1.0, marker="v", color="k")  # small spike marker (arbitrary y)
-            ax.set_ylim(0, 1.05)
-            ax.text(t, 1.0, f"{t:.1f}", ha="center", va="bottom", fontsize=8)
-        else:
-            a, b, alpha, beta_param, m = params_idx
-            # Build a PERT-like PDF using scipy's beta if available
-            xs = np.linspace(a, b, 400)
+        for idx, (name, t, d, u) in enumerate(chunk_components):
+            r = idx // ncols
+            c = idx % ncols
+            ax = axes[r][c]
 
-            from scipy.stats import beta
-            pdf_values = beta.pdf((xs - a) / (b - a), alpha, beta_param) / (b - a)
+            params_idx = chunk_params[idx]
 
-            ax.plot(xs, pdf_values, label=name)
-            ax.fill_between(xs, pdf_values, alpha=0.15)
+            if params_idx[0] is None:
+                # Fixed-value vertical line
+                ax.axvline(t, color="k", linestyle="--", label=f"{name} (fixed)")
+                ax.plot(t, 1.0, marker="v", color="k")  # small spike marker (arbitrary y)
+                ax.set_ylim(0, 1.05)
+                ax.text(t, 1.0, f"{t:.1f}", ha="center", va="bottom", fontsize=8)
+            else:
+                a, b, alpha, beta_param, m = params_idx
+                xs = np.linspace(a, b, 400)
 
-            # Min/max markers
-            ax.plot(a, 0, marker="o", color="red", markersize=5)
-            ax.text(a, 0, f"{a:.1f}", ha="right", va="bottom", fontsize=8)
-            ax.plot(b, 0, marker="o", color="red", markersize=5)
-            ax.text(b, 0, f"{b:.1f}", ha="left", va="bottom", fontsize=8)
+                from scipy.stats import beta
+                pdf_values = beta.pdf((xs - a) / (b - a), alpha, beta_param) / (b - a)
 
-            # Mode / Predicted Mass
-            ax.axvline(t, color="k", linestyle=":", lw=1.5, label=f"Predicted: {t:.1f}")
-            ax.text(t, ax.get_ylim()[1]*0.95, f"{t:.1f}",
-                    ha="center", va="top", fontsize=8, color="k")
+                ax.plot(xs, pdf_values, label=name)
+                ax.fill_between(xs, pdf_values, alpha=0.15)
 
-        ax.set_title(name)
-        ax.set_xlabel("Mass [kg]")
-        ax.set_ylabel("Density")
-        ax.grid(True, alpha=0.25)
-        ax.legend(loc="upper right", fontsize="small")
+                # Min/max markers
+                ax.plot(a, 0, marker="o", color="red", markersize=5)
+                ax.text(a, 0, f"{a:.1f}", ha="right", va="bottom", fontsize=8)
+                ax.plot(b, 0, marker="o", color="red", markersize=5)
+                ax.text(b, 0, f"{b:.1f}", ha="left", va="bottom", fontsize=8)
 
-    # Hide extra empty axes
-    total_subplots = nrows * ncols
-    for idx in range(n, total_subplots):
-        r = idx // ncols
-        c = idx % ncols
-        axes[r][c].axis("off")
+                # Mode / Predicted Mass
+                ax.axvline(t, color="k", linestyle=":", lw=1.5, label=f"Predicted: {t:.1f}")
+                ax.text(t, ax.get_ylim()[1]*0.95, f"{t:.1f}",
+                        ha="center", va="top", fontsize=8, color="k")
 
-    plt.suptitle(plot_name)
-    plt.tight_layout(rect=[0, 0, 1, 0.98])
-    fname = sanitize_filename(plot_name) + ".png"
-    plt.savefig(fname, dpi=300)
-    plt.close()
+            ax.set_title(name)
+            ax.set_xlabel("Mass [kg]")
+            ax.set_ylabel("Density")
+            ax.grid(True, alpha=0.25)
+            ax.legend(loc="upper right", fontsize="small")
+
+        # Hide extra empty axes
+        for idx in range(n_chunk, nrows * ncols):
+            axes[idx // ncols][idx % ncols].axis("off")
+
+        # Use " - Part N" suffix only when there is more than one figure
+        part_label = f" - Part {fig_idx + 1}" if n_figures > 1 else ""
+        fig_title = f"{plot_name}{part_label}"
+        plt.suptitle(fig_title)
+        plt.tight_layout(rect=[0, 0, 1, 0.98])
+        fname = sanitize_filename(fig_title) + ".png"
+        plt.savefig(fname, dpi=300)
+        plt.close()
+        saved_files.append(fname)
+
+    return saved_files
 
 # -----------------------------
 # L1B Group Monte-Carlo Plots (PDF & CDF)
@@ -490,7 +566,7 @@ def plot_monte_carlo_cdf(samples, title):
 # Aircraft-level Monte‑Carlo
 # ============================================================
 
-# Build parameters for all L2 components
+# Build parameters for all L3 components
 all_params = [
     make_pert_params(c["predicted"], c["neg_unc"], c["pos_unc"])
     for c in components
@@ -666,7 +742,7 @@ if mass_diff > 0:
     print(f"  Available margin: {mass_diff:.1f} kg")
 else:
     print("  ✘ Target mass CANNOT be achieved at the required confidence level.")
-    print(f"  Required cumulative L2 mass reduction: {-mass_diff:.1f} kg")
+    print(f"  Required cumulative L3 mass reduction: {-mass_diff:.1f} kg")
 
 print(f"All plots saved to the current directory.")
 print("\nMass simulation completed successfully.")
@@ -680,48 +756,53 @@ print("\n=== Generating Component-level PERT distributions for Appendix ===\n")
 for group_name, items in by_group.items():
     if not items:
         continue
-    # Build PERT parameters for plotting (no heavy Monte Carlo here)
-    # Special-case: split Vehicle Systems into two images so they fit page width.
-    if group_name == "Vehicle Systems" and len(items) > 1:
-        half = len(items) // 2
-        first_items = items[:half]
-        second_items = items[half:]
 
-        for idx, part in enumerate((first_items, second_items), start=1):
-            if not part:
-                continue
-            pert_params_part = [make_pert_params(it["predicted"], it["neg_unc"], it["pos_unc"]) for it in part]
-            component_tuples_part = [(it["name"], it["predicted"], it["neg_unc"], it["pos_unc"]) for it in part]
-            plot_component_pdfs(
-                component_tuples_part,
-                pert_params_part,
-                plot_name=f"{group_name} - Component PERT Distributions - Part {idx}"
-            )
-    else:
+    # Sub-group the L3 components by their L2 parent
+    by_l2: dict[str, list] = {}
+    for it in items:
+        by_l2.setdefault(it["l2_parent"], []).append(it)
+
+    for l2_name, l2_items in by_l2.items():
         pert_params = [
-            make_pert_params(it["predicted"], it["neg_unc"], it["pos_unc"]) for it in items
+            make_pert_params(it["predicted"], it["neg_unc"], it["pos_unc"]) for it in l2_items
         ]
-
-        component_tuples = [(it["name"], it["predicted"], it["neg_unc"], it["pos_unc"]) for it in items]
-
+        component_tuples = [(it["name"], it["predicted"], it["neg_unc"], it["pos_unc"]) for it in l2_items]
         plot_component_pdfs(
             component_tuples,
             pert_params,
-            plot_name=f"{group_name} - Component PERT Distributions"
+            plot_name=f"{group_name} - {l2_name} - Component PERT Distributions"
         )
 
-# 2) Optionally create L1B PDFs/CDFs when exports enabled
+# 2) Optionally create L2 PDFs/CDFs when exports enabled
+if L2_simulations_exports:
+    print("\n=== Generating L2 PDFs and CDFs (exports enabled) ===\n")
+    for group_name, items in by_group.items():
+        if not items:
+            continue
+
+        # Sub-group by L2 parent and run Monte Carlo per L2 system
+        by_l2_export: dict[str, list] = {}
+        for it in items:
+            by_l2_export.setdefault(it["l2_parent"], []).append(it)
+
+        for l2_name, l2_items in by_l2_export.items():
+            pert_params = [make_pert_params(it["predicted"], it["neg_unc"], it["pos_unc"]) for it in l2_items]
+            l2_samples = run_monte_carlo(pert_params, N_SAMPLES)
+            plot_monte_carlo_pdf(l2_samples, title=f"{group_name} - {l2_name} - Mass Distribution (L2)")
+            plot_monte_carlo_cdf(l2_samples, title=f"{group_name} - {l2_name} - Mass CDF (L2)")
+
+    print("\nAll L2 PDFs and CDFs created.\n")
+
+# 3) Optionally create L1B PDFs/CDFs when exports enabled
 if L1B_simulations_exports:
     print("\n=== Generating L1B PDFs and CDFs (exports enabled) ===\n")
     for group_name, items in by_group.items():
         if not items:
             continue
 
-        # Build PERT params and run Monte Carlo for this L1B group
+        # Build PERT params from all L3 items and run Monte Carlo summed to L1B level
         pert_params = [make_pert_params(it["predicted"], it["neg_unc"], it["pos_unc"]) for it in items]
         l1b_samples = run_monte_carlo(pert_params, N_SAMPLES)
-
-        # Save L1B PDF and CDF plots
         plot_monte_carlo_pdf(l1b_samples, title=f"{group_name} - Mass Distribution (L1B)")
         plot_monte_carlo_cdf(l1b_samples, title=f"{group_name} - Mass CDF (L1B)")
 
@@ -1001,17 +1082,16 @@ else:
     group_names = [g for g in preferred_order if g in by_group] + [g for g in by_group.keys() if g not in preferred_order]
 
     
-    def make_group_tabularx_tex(group_name: str, items: list[dict]) -> str:
+    def make_l2_tabularx_tex(l2_name: str, items: list[dict]) -> str:
         r"""
-        Render a fully-bordered tabularx table (Option A: vertical rules between all columns
-        and horizontal rules between all rows). This replaces the previous booktabs-style table.
+        Render a fully-bordered tabularx table for the L3 components of one L2 system.
 
         Requirements (already present in your template):
         \usepackage{tabularx}     % column type X
         """
 
         # Caption text (escape LaTeX specials)
-        caption_text = tex_escape(f"L2 components for {group_name}")
+        caption_text = tex_escape(f"L3 component mass properties -- {l2_name}")
 
         # Build the header with full borders
         header = (
@@ -1028,6 +1108,13 @@ else:
         # Body rows: one \hline after every row for continuous borders
         rows: list[str] = []
         if items:
+            # Compute column totals for the summary row
+            total_basic     = sum(it.get("basic",     0.0) for it in items)
+            total_mga       = sum(it.get("mga",       0.0) for it in items)
+            total_predicted = sum(it.get("predicted", 0.0) for it in items)
+            total_pos_unc   = sum(it.get("pos_unc",   0.0) for it in items)
+            total_neg_unc   = sum(it.get("neg_unc",   0.0) for it in items)
+
             for it in sorted(items, key=lambda x: x.get("name", "")):
                 title = tex_escape(it.get("name", ""))
                 basic = fmt_kg(it.get("basic", 0.0))
@@ -1037,9 +1124,21 @@ else:
                 dn = fmt_kg(it.get("neg_unc", 0.0))  # stays signed (typically negative)
                 row = f"{title} & {basic} & {mga} & {predicted} & {up} & {dn} \\\\ \\hline"
                 rows.append(row)
+
+            # Totals / summary row — an extra \hline creates a double rule above it
+            summary_row = (
+                r"\hline" + "\n"
+                + r"\textbf{" + tex_escape(f"{l2_name} -- Total") + r"} & "
+                + r"\textbf{" + fmt_kg(total_basic)     + r"} & "
+                + r"\textbf{" + fmt_kg(total_mga)       + r"} & "
+                + r"\textbf{" + fmt_kg(total_predicted) + r"} & "
+                + r"\textbf{" + fmt_kg(total_pos_unc)   + r"} & "
+                + r"\textbf{" + fmt_kg(total_neg_unc)   + r"} \\\\ \\hline"
+            )
+            rows.append(summary_row)
         else:
             # Keep the frame and show a single info row spanning all columns
-            rows.append(r"\multicolumn{6}{|l|}{\emph{No items in this group.}} \\ \hline")
+            rows.append(r"\multicolumn{6}{|l|}{\emph{No L3 components for this L2 system.}} \\ \hline")
 
         body = "\n".join(rows)
 
@@ -1066,8 +1165,8 @@ else:
     buf = io.StringIO()
     buf.write("% ================== AUTO-GENERATED (do not edit manually) ==================\n")
     buf.write(f"% Generated by Mass Management Simulation on {timestamp_str}\n\n")
-    buf.write(r"\chapter{Status of L2 PBS Mass Estimates}" + "\n\n")
-    buf.write(r"This chapter reproduces the Level 2 (L2) component mass properties relevant at the date of generation." + "\n")
+    buf.write(r"\chapter{Status of PBS Mass Estimates}" + "\n\n")
+    buf.write(r"This chapter reproduces the Level 3 (L3) component mass properties used as simulation inputs, organised by L1B group and L2 system." + "\n")
     # buf.write(r"Sheet used: " + tex_escape(newest_sheet) + "\n\n")
 
     # (0) Aircraft-level target parameters: include imported aircraft parameters
@@ -1094,60 +1193,41 @@ else:
 
     buf.write(r"\end{description}" + "\n\n")
 
-    # (1) Input Data: create one section per L1B group (table + L1B simulation summary + figures)
+    # (1) Input Data: one section per L1B group; one subsection + table per L2 system
 
     for g in group_names:
         items = by_group.get(g, [])
         buf.write(r"\section{" + tex_escape(g) + r"}" + "\n")
         if items:
-            buf.write(make_group_tabularx_tex(g, items))
-            buf.write("\n")
-
-            # Compute a simple aggregated summary for this L1B group
+            # --- L1B aggregate summary ---
             try:
-                L1B_basic_mass = sum([it.get("basic", 0.0) for it in items])
-                L1B_predicted_mass = sum([it.get("predicted", 0.0) for it in items])
-                L1B_MGA = sum([it.get("mga", 0.0) for it in items])
+                L1B_basic_mass = sum(it.get("basic", 0.0) for it in items)
+                L1B_predicted_mass = sum(it.get("predicted", 0.0) for it in items)
+                L1B_MGA = sum(it.get("mga", 0.0) for it in items)
                 pert_params = [make_pert_params(it["predicted"], it["neg_unc"], it["pos_unc"]) for it in items]
                 l1b_samples = run_monte_carlo(pert_params, N_SAMPLES) if pert_params else np.array([])
                 if l1b_samples.size > 0:
                     p5, p50, p95 = np.percentile(l1b_samples, [5, 50, 95])
                 else:
                     p5 = p50 = p95 = L1B_predicted_mass
-
             except Exception as e:
                 print(f"Error computing L1B summary for group '{g}': {e}")
                 p5 = p50 = p95 = 0
-                L1B_basic_mass = 0
-                L1B_predicted_mass = 0
-                L1B_MGA = 0
+                L1B_basic_mass = L1B_predicted_mass = L1B_MGA = 0
 
-            
-            
-            # --- L1B summary (NEW): description list with siunitx, no verbatim ---
             buf.write(r"\small\begin{description}" + "\n")
-
-            # Basic meta
-            buf.write(fr"\item[{_label('Components:')}] \num{{{len(items)}}}" + "\n")
-
-            # Mass summaries
+            buf.write(fr"\item[{_label('L3 components:')}] \num{{{len(items)}}}" + "\n")
             buf.write(fr"\item[{_label('Total basic mass:')}] \SI{{{L1B_basic_mass:.1f}}}{{\kilogram}}" + "\n")
             buf.write(fr"\item[{_label('Total predicted mass:')}] \SI{{{L1B_predicted_mass:.1f}}}{{\kilogram}}" + "\n")
             buf.write(fr"\item[{_label('Total MGA:')}] \SI{{{L1B_MGA:.1f}}}{{\kilogram}}" + "\n")
-
-            # Monte Carlo stats
             buf.write(fr"\item[{_label('Monte Carlo median (P50):')}] \SI{{{p50:.1f}}}{{\kilogram}}" + "\n")
             buf.write(fr"\item[{_label('Uncertainty band (P5--P95):')}] "
                     fr"\SIrange{{{p5:.1f}}}{{{p95:.1f}}}{{\kilogram}}" + "\n")
-
             buf.write(r"\end{description}" + "\n\n")
 
-            # Figure filenames (sanitized during plotting earlier)
-            # Component PERT distributions are placed in the Appendix (Level 2 PERT-Distributions)
+            # Optional L1B PDF/CDF figures (only present when L1B_simulations_exports was True)
             l1b_pdf_img = sanitize_filename(f"{g} - Mass Distribution (L1B)") + ".png"
             l1b_cdf_img = sanitize_filename(f"{g} - Mass CDF (L1B)") + ".png"
-
-            # Only include L1B images if they exist in the figures folder
             l1b_pdf_path = CHAPTER_FIGURES_DIR / l1b_pdf_img
             l1b_cdf_path = CHAPTER_FIGURES_DIR / l1b_cdf_img
 
@@ -1155,15 +1235,50 @@ else:
                 buf.write(r"\begin{figure}[H]" + "\n")
                 buf.write(r"\centering" + "\n")
                 buf.write(r"\includegraphics[width=0.9\textwidth]{Chapter1/figures/" + l1b_pdf_img.replace("\\", "/") + "}\n")
-                buf.write(r"\caption{" + tex_escape(g) + r" - Mass Distribution (L1B)}" + "\n")
+                buf.write(r"\caption{" + tex_escape(g) + r" -- Mass Distribution (L1B)}" + "\n")
                 buf.write(r"\end{figure}" + "\n\n")
 
             if l1b_cdf_path.exists():
                 buf.write(r"\begin{figure}[H]" + "\n")
                 buf.write(r"\centering" + "\n")
                 buf.write(r"\includegraphics[width=0.9\textwidth]{Chapter1/figures/" + l1b_cdf_img.replace("\\", "/") + "}\n")
-                buf.write(r"\caption{" + tex_escape(g) + r" - Mass CDF (L1B)}" + "\n")
+                buf.write(r"\caption{" + tex_escape(g) + r" -- Mass CDF (L1B)}" + "\n")
                 buf.write(r"\end{figure}" + "\n\n")
+
+            # --- L2 subsections: one subsection + table (+ optional L2 figures) per L2 system ---
+            seen_l2: list[str] = []
+            by_l2_sec: dict[str, list] = {}
+            for it in items:
+                lp = it.get("l2_parent", "Unknown")
+                if lp not in seen_l2:
+                    seen_l2.append(lp)
+                by_l2_sec.setdefault(lp, []).append(it)
+
+            for l2_name in seen_l2:
+                l2_items = by_l2_sec[l2_name]
+                buf.write(r"\subsection{" + tex_escape(l2_name) + r"}" + "\n")
+                buf.write(make_l2_tabularx_tex(l2_name, l2_items))
+                buf.write("\n")
+
+                # Optional L2 PDF/CDF figures (only present when L2_simulations_exports was True)
+                l2_pdf_img = sanitize_filename(f"{g} - {l2_name} - Mass Distribution (L2)") + ".png"
+                l2_cdf_img = sanitize_filename(f"{g} - {l2_name} - Mass CDF (L2)") + ".png"
+                l2_pdf_path = CHAPTER_FIGURES_DIR / l2_pdf_img
+                l2_cdf_path = CHAPTER_FIGURES_DIR / l2_cdf_img
+
+                if l2_pdf_path.exists():
+                    buf.write(r"\begin{figure}[H]" + "\n")
+                    buf.write(r"\centering" + "\n")
+                    buf.write(r"\includegraphics[width=0.9\textwidth]{Chapter1/figures/" + l2_pdf_img.replace("\\", "/") + "}\n")
+                    buf.write(r"\caption{" + tex_escape(l2_name) + r" -- Mass Distribution (L2)}" + "\n")
+                    buf.write(r"\end{figure}" + "\n\n")
+
+                if l2_cdf_path.exists():
+                    buf.write(r"\begin{figure}[H]" + "\n")
+                    buf.write(r"\centering" + "\n")
+                    buf.write(r"\includegraphics[width=0.9\textwidth]{Chapter1/figures/" + l2_cdf_img.replace("\\", "/") + "}\n")
+                    buf.write(r"\caption{" + tex_escape(l2_name) + r" -- Mass CDF (L2)}" + "\n")
+                    buf.write(r"\end{figure}" + "\n\n")
         else:
             buf.write("(no components for this group)\n\n")
 
@@ -1250,37 +1365,62 @@ else:
 
 
     # ============================================================
-    # Appendix: Level 2 PERT distributions (one section per L1B group)
+    # Appendix: Level 3 PERT distributions (one section per L1B group,
+    #           one subsection per L2 system)
     # ============================================================
 
     buf.write(r"\appendix" + "\n")
-    buf.write(r"\chapter{Level 2 PERT-Distributions}" + "\n\n")
+    buf.write(r"\chapter{Level 3 PERT-Distributions}" + "\n\n")
     for g in group_names:
+        items_for_group = by_group.get(g, [])
         buf.write(r"\section{" + tex_escape(g) + r"}" + "\n")
-        # Vehicle Systems may have been split into two parts; include both if present
-        if g == "Vehicle Systems":
-            for idx in (1, 2):
-                comp_img = sanitize_filename(f"{g} - Component PERT Distributions - Part {idx}") + ".png"
+
+        # Collect ordered unique L2 parents, preserving first-seen order
+        seen_l2: list[str] = []
+        for it in items_for_group:
+            lp = it.get("l2_parent", "Unknown")
+            if lp not in seen_l2:
+                seen_l2.append(lp)
+
+        for l2_name in seen_l2:
+            buf.write(r"\subsection{" + tex_escape(l2_name) + r"}" + "\n")
+            base_plot_name = f"{g} - {l2_name} - Component PERT Distributions"
+
+            # Check for paginated parts first (Part 1, Part 2, ...)
+            part_idx = 1
+            found_any = False
+            while True:
+                comp_img = sanitize_filename(f"{base_plot_name} - Part {part_idx}") + ".png"
+                comp_img_path = CHAPTER_FIGURES_DIR / comp_img
+                if not comp_img_path.exists():
+                    break
+                found_any = True
+                buf.write(r"\begin{figure}[H]" + "\n")
+                buf.write(r"\centering" + "\n")
+                buf.write(r"\includegraphics[width=0.95\textwidth]{Chapter1/figures/" + comp_img.replace("\\", "/") + "}\n")
+                buf.write(
+                    r"\caption{Component PERT distributions for "
+                    + tex_escape(g) + r" -- " + tex_escape(l2_name)
+                    + r" (Part " + str(part_idx) + r")}" + "\n"
+                )
+                buf.write(r"\end{figure}" + "\n\n")
+                part_idx += 1
+
+            # Fall back to the single-page (no-suffix) file when all fits on one figure
+            if not found_any:
+                comp_img = sanitize_filename(base_plot_name) + ".png"
                 comp_img_path = CHAPTER_FIGURES_DIR / comp_img
                 if comp_img_path.exists():
                     buf.write(r"\begin{figure}[H]" + "\n")
                     buf.write(r"\centering" + "\n")
                     buf.write(r"\includegraphics[width=0.95\textwidth]{Chapter1/figures/" + comp_img.replace("\\", "/") + "}\n")
-                    buf.write(r"\caption{Component PERT distributions for " + tex_escape(g) + r" (Part " + str(idx) + r")}" + "\n")
+                    buf.write(
+                        r"\caption{Component PERT distributions for "
+                        + tex_escape(g) + r" -- " + tex_escape(l2_name) + r"}" + "\n"
+                    )
                     buf.write(r"\end{figure}" + "\n\n")
                 else:
-                    buf.write("% Component PERT distributions image (part) not present; omitted.\n\n")
-        else:
-            comp_img = sanitize_filename(f"{g} - Component PERT Distributions") + ".png"
-            comp_img_path = CHAPTER_FIGURES_DIR / comp_img
-            if comp_img_path.exists():
-                buf.write(r"\begin{figure}[H]" + "\n")
-                buf.write(r"\centering" + "\n")
-                buf.write(r"\includegraphics[width=0.95\textwidth]{Chapter1/figures/" + comp_img.replace("\\", "/") + "}\n")
-                buf.write(r"\caption{Component PERT distributions for " + tex_escape(g) + r"}" + "\n")
-                buf.write(r"\end{figure}" + "\n\n")
-            else:
-                buf.write("% Component PERT distributions image not present for this group; omitted.\n\n")
+                    buf.write("% Component PERT distributions image not present for this L2 system; omitted.\n\n")
 
     CHAPTER_TEX.write_text(buf.getvalue(), encoding="utf-8")
     print(f"Chapter written: {CHAPTER_TEX}")
