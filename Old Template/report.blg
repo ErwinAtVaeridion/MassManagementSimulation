@@ -1,0 +1,79 @@
+This is BibTeX, Version 0.99d
+Capacity: max_strings=200000, hash_size=200000, hash_prime=170003
+The top-level auxiliary file: report.aux
+Reallocating 'name_of_file' (item size: 1) to 35 items.
+The style file: VAERIDION_Latex_bibliography_style.bst
+Reallocating 'name_of_file' (item size: 1) to 24 items.
+A level-1 auxiliary file: titlePage/titlePage.aux
+Reallocating 'name_of_file' (item size: 1) to 32 items.
+A level-1 auxiliary file: revisionSheet/revisionSheet.aux
+Reallocating 'name_of_file' (item size: 1) to 40 items.
+A level-1 auxiliary file: documentApprovals/documentApprovals.aux
+Reallocating 'name_of_file' (item size: 1) to 30 items.
+A level-1 auxiliary file: nomenclature/nomenclature.aux
+Reallocating 'name_of_file' (item size: 1) to 28 items.
+A level-1 auxiliary file: definitions/definitions.aux
+Reallocating 'name_of_file' (item size: 1) to 29 items.
+Reallocating 'name_of_file' (item size: 1) to 20 items.
+A level-1 auxiliary file: summary/summary.aux
+Reallocating 'name_of_file' (item size: 1) to 30 items.
+A level-1 auxiliary file: purposeScope/purposeScope.aux
+Reallocating 'name_of_file' (item size: 1) to 22 items.
+A level-1 auxiliary file: Chapter1/Chapter1.aux
+Reallocating 'name_of_file' (item size: 1) to 22 items.
+A level-1 auxiliary file: Chapter2/Chapter2.aux
+Reallocating 'name_of_file' (item size: 1) to 28 items.
+A level-1 auxiliary file: conclusions/conclusions.aux
+Reallocating 'name_of_file' (item size: 1) to 24 items.
+A level-1 auxiliary file: appendices/appendix.aux
+Reallocating 'name_of_file' (item size: 1) to 28 items.
+A level-1 auxiliary file: attachments/attachments.aux
+Database file #1: VAERIDION_Latex_bibliography.bib
+Reallocating 'wiz_functions' (item size: 4) to 6000 items.
+Warning--empty author and editor in AircraftConfigRationale
+Warning--empty author and editor in PBS
+Warning--empty author and editor in airfoilDescription
+Warning--empty author and editor in ADPerformance
+Warning--empty author and editor in PowerplantConceptualDMU
+You've used 5 entries,
+            3319 wiz_defined-function locations,
+            714 strings with 6264 characters,
+and the built_in function-call counts, 1660 in all, are:
+= -- 100
+> -- 0
+< -- 0
++ -- 10
+- -- 1
+* -- 122
+:= -- 196
+add.period$ -- 5
+call.type$ -- 5
+change.case$ -- 20
+chr.to.int$ -- 6
+cite$ -- 20
+duplicate$ -- 165
+empty$ -- 231
+format.name$ -- 0
+if$ -- 356
+int.to.chr$ -- 1
+int.to.str$ -- 6
+missing$ -- 25
+newline$ -- 25
+num.names$ -- 0
+pop$ -- 75
+preamble$ -- 1
+purify$ -- 20
+quote$ -- 0
+skip$ -- 71
+stack$ -- 0
+substring$ -- 65
+swap$ -- 55
+text.length$ -- 0
+text.prefix$ -- 0
+top$ -- 0
+type$ -- 20
+warning$ -- 5
+while$ -- 0
+width$ -- 0
+write$ -- 54
+(There were 5 warnings)

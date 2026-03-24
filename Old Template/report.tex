@@ -1,30 +1,7 @@
-% ----------------------------------------------------------------------
-% Nando van Arnhem, VÆRIDION (VÆR), 01.09.2025
-% nando@vaeridion.com
-% Example of creating a Latex document
-
-%       _____   _____
-%      /     / \     \
-%     /     /   \     \
-%          |     |    /
-%       ___|__ __|___/
-%      /   |     |
-%     /    |     |
-%     \     \   /     /
-%      \_____\ /_____/
-
-% Version history:
-
-% v1 - 01.09.2025
-% Updated font, new class file
-
-% v0 - 01.03.2025
-% Initial version
-
 %% ==================================================================== %%
 %% 	Load templates
 %% ==================================================================== %%
-\documentclass[oneside]{VAERIDION_Latex_LatexClassFile} % Added by Mass Management script\n\usepackage{siunitx}\n\sisetup{detect-all=true}\n% Load the document class file
+\documentclass[oneside]{VAERIDION_Latex_LatexClassFile} % Load the document class file
 \bibliographystyle{VAERIDION_Latex_bibliography_style} % bib style
 
 %% ==================================================================== %%
@@ -35,10 +12,6 @@
 \def \revisionNumber {A}
 \def \authorName {Erwin Güther}
 \def \authorFunction {Working Student - Overall Aircraft Design}
-\def \checkerName {First Checker Name}
-\def \checkerFunction {First Checker Function}
-\def \approverName {Approver Name}
-\def \approverFunction {Approver Function}
 \def \titleDoc {Aircraft Mass Status Report}
 \def \subtitleDoc {}
 \title[\subtitleDoc]{\titleDoc} 
@@ -51,7 +24,8 @@
 \usepackage{aeb_pro}
 \usepackage{multirow} 							% tables with multiple rows
 \usepackage{longtable,tabularx} 				% tables over multiple pages (nomenclature)
-\usepackage{hyphenat} 							% hyphenation
+\usepackage{hyphenat}
+\usepackage{siunitx} 							% hyphenation
 %\usepackage{subcaption} 						% subplots with subcaptions
 %\usetikzlibrary{arrows,calc,fit,positioning}	% controls for tikz image (thesis roadmap)
 \usepackage{enumitem} 							% reverse numbering in list (list of publications)
@@ -77,16 +51,6 @@
 \newtheorem{researchquestion}{Research question}
 \usepackage[export]{adjustbox}
 \usepackage{epstopdf} 
-
-\usepackage{siunitx}
-\sisetup{
-  mode = text,
-  reset-text-family = false,
-  reset-text-series = false,
-  reset-text-shape  = false,
-%   text-family-to-use = \rmfamily % Or \sffamily for sans-serif
-}
-
 \floatsetup{heightadjust=object}
 \floatsetup[table]{capposition=top}
 \setlength{\headheight}{35pt}
@@ -121,15 +85,15 @@
 	\hypersetup{linkcolor=black}
 	\tableofcontents
 }
-%\pdfbookmark[0]{Table of Contents}{table} % add bookmark to PDF
-%\cleardoublepage
+\pdfbookmark[0]{Table of Contents}{table} % add bookmark to PDF
+\cleardoublepage
 % \include{nomenclature/nomenclature}						
 % \include{definitions/definitions}	
 % \bibliography{VAERIDION_Latex_bibliography}  			% bibliography file				
 % \include{summary/summary} 	
-%\thumbtrue 		
+\thumbtrue 		
 
-%\cleardoublepage
+\cleardoublepage
 % Turn on thumb indices.
 \include{purposeScope/purposeScope}			% {ch:introduction}
 %% ==================================================================== %%

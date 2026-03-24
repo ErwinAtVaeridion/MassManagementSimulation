@@ -1,0 +1,52 @@
+\chapter{Second Chapter of Document}
+\label{chapt:chap1}
+\section{Example Section with Some Text, Figures, and Tables}
+\label{sect:chap1:sect1}
+Figure \ref{fig:exampleFigure1} shows an example figure. Another example of a figure is shown in Fig. \ref{fig:exampleFigure2}.
+
+\begin{figure}[h!]
+	\centering
+	\includegraphics[width=1\textwidth]{{Chapter2/figures/Example_Figure}}
+	\caption{Example figure with at full width of text.}
+	\label{fig:exampleFigure1}
+\end{figure}
+
+\begin{figure}[h!]
+	\centering
+	\subfloat[Subfigure 1]{
+	\includegraphics[width=0.5\textwidth]{{Chapter2/figures/Example_Figure}}}
+	\subfloat[Subfigure 2]{
+	\includegraphics[width=0.5\textwidth]{{Chapter2/figures/Example_Figure}}}\\
+	\subfloat[Subfigure 3]{
+	\includegraphics[width=0.5\textwidth]{{Chapter2/figures/Example_Figure}}}
+	\caption{Example figure with some subfigures.}
+	\label{fig:exampleFigure2}
+\end{figure}
+
+An example of a table is shown in Table \ref{tab:exampleTable}. 
+
+\input{Chapter2/tables/exampleTable}
+
+
+\FloatBarrier
+
+\section{Example Section with Equations}
+
+
+An example of a simple equation is given in Eq. \ref{eq:equation1}.
+\begin{equation}
+	\label{eq:equation1}
+		y = 5x 
+\end{equation}
+
+An example of a more complex equation is given in Eq. \ref{eq:equation2}.
+
+\begin{equation}
+		\label{eq:equation2}
+	\begin{aligned}
+		G_{\text{1,}X} &={G_{x1}}L_\text{front,mid}+\Delta X_{G1}\\
+		G_{\text{1,}Y} &=G_{\text{1,}y}\left(\frac{w_\text{fuse}}{2}-R_\text{spinner} \right)\\
+		G_{\text{1,}Z} &=G_{\text{1,}z}\Delta Z_\text{prop}
+	\end{aligned}
+\end{equation}
+

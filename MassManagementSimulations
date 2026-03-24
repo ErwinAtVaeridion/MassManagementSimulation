@@ -1369,8 +1369,8 @@ else:
     # Short intro line for the chapter
     buf.write(r"This chapter shows the Monte Carlo results obtained for aircraft-level statistics." + "\n\n")
 
-    # --- Summary as a clean description list (no verbatim) ---
-    buf.write(r"\small\begin{description}" + "\n")
+    # --- Summary as a clean itemize list ---
+    buf.write(r"\begin{itemize}" + "\n")
 
     # compute overall aircraft mass aggregates from L2 components
     total_basic_mass = sum(c.get("basic", 0.0) for c in components)
@@ -1381,37 +1381,37 @@ else:
     # mass_diff was already defined earlier but recompute here to be safe
     excess_mass = OEM_TARGET - v_conf_air
 
-    # write the totals into the LaTeX description list
-    buf.write(fr"\item[{_label('Total basic mass:')}] \SI{{{total_basic_mass:.1f}}}{{\kilogram}}" + "\n")
-    buf.write(fr"\item[{_label('Total predicted mass:')}] \SI{{{total_predicted_mass:.1f}}}{{\kilogram}}" + "\n")
-    buf.write(fr"\item[{_label('Total MGA:')}] \SI{{{total_mga:.1f}}}{{\kilogram}}" + "\n")
+    # write the totals into the LaTeX itemize list
+    buf.write(fr"\item Total basic mass: \SI{{{total_basic_mass:.1f}}}{{\kilogram}}" + "\n")
+    buf.write(fr"\item Total predicted mass: \SI{{{total_predicted_mass:.1f}}}{{\kilogram}}" + "\n")
+    buf.write(fr"\item Total MGA: \SI{{{total_mga:.1f}}}{{\kilogram}}" + "\n")
 
     # Percentiles tabled as individual items (keeps alignment simple and robust)
     for p, v in zip(pcts, vals):  # pcts = [25, 50, 75, 90, 95]
-        buf.write(fr"\item[{_label(ordinal(p) + ' percentile mass:')}] \SI{{{v:.1f}}}{{\kilogram}}" + "\n")
+        buf.write(fr"\item {ordinal(p)} percentile mass: \SI{{{v:.1f}}}{{\kilogram}}" + "\n")
 
     # Confidence percentile (e.g., P80) as its own item, use ordinal too
-    buf.write(fr"\item[{_label(ordinal(int(CONFIDENCE_LEVEL)) + ' percentile mass:')}] \SI{{{v_conf_air:.1f}}}{{\kilogram}}" + "\n")
+    buf.write(fr"\item {ordinal(int(CONFIDENCE_LEVEL))} percentile mass: \SI{{{v_conf_air:.1f}}}{{\kilogram}}" + "\n")
 
     # excess mass (target minus confidence)
-    buf.write(fr"\item[{_label('Mass Margin to Aircraft Target Mass:')}] \SI{{{excess_mass:.1f}}}{{\kilogram}}" + "\n")
+    buf.write(fr"\item Mass Margin to Aircraft Target Mass: \SI{{{excess_mass:.1f}}}{{\kilogram}}" + "\n")
     buf.write(
-        fr"\item[{_label(f'Probability mass less than or equal to {int(OEM_TARGET)} kg (Aircraft target mass):')}] "
+        fr"\item Probability mass less than or equal to {int(OEM_TARGET)} kg (Aircraft target mass): "
         fr"\SI{{{prob_aircraft_mass_target_pct:.2f}}}{{\percent}}"
         + "\n"
     )
 
     # Probability of meeting the Entry-Into-Service mass (percentage)
     buf.write(
-        fr"\item[{_label(f'Probability mass less than or equal to {int(ENTRY_INTO_SERVICE_MASS)} kg (Entry-into-service mass):')}] "
+        fr"\item Probability mass less than or equal to {int(ENTRY_INTO_SERVICE_MASS)} kg (Entry-into-service mass): "
         fr"\SI{{{prob_eis_pct:.2f}}}{{\percent}}"
         + "\n"
     )
 
     # Show the number of Monte Carlo samples (nice for traceability)
-    buf.write(fr"\item[{_label('Monte Carlo Samples:')}] \num{{{N_SAMPLES}}}" + "\n")
+    buf.write(fr"\item Monte Carlo Samples: \num{{{N_SAMPLES}}}" + "\n")
 
-    buf.write(r"\end{description}" + "\n\n")
+    buf.write(r"\end{itemize}" + "\n\n")
 
 
     # (3) Insert the PDF and CDF figures right below the summary
