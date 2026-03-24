@@ -15,11 +15,19 @@ Author: Erwin @ VÆRIDION
 
 #%%
 # Controls
-L1B_simulations_exports = False  # Set to True to generate L1B-level PDF and CDF plots
-L2_simulations_exports = False   # Set to True to generate L2-level PDF and CDF plots
+L1B_simulations_exports = False          # Set to True to generate L1B-level PDF and CDF plots
+L2_simulations_exports = False           # Set to True to generate L2-level PDF and CDF plots
+Time_History_Export = False              # Set to True to copy 'Master Summary' into Mass_Analysis_History.xlsx
+Include_L3_Input_Distributions = False   # Set to True to generate and include L3 PERT input distribution plots
+Save_Figs_as_PDF = True                      # Set to True to save all figures as PDF instead of PNG
+
+N_SAMPLES = 500000
 
 #%%
 TEST_RUN = False # Set to True to skip PDF generation and delete results after the run (for testing purposes)
+
+# Derived figure file extension (used by all savefig calls and LaTeX includes)
+FIG_EXT = ".pdf" if Save_Figs_as_PDF else ".png"
 
 #%%
 # -----------------------------
@@ -48,7 +56,7 @@ from scipy.stats import gaussian_kde as _scipy_gaussian_kde
 # -----------------------------
 
 # Monte‑Carlo settings
-N_SAMPLES = 500_000
+
 RNG = np.random.default_rng(42)
 
 # Expected L1B group names in Column B near a "Level 1B" row
@@ -77,6 +85,69 @@ file_path = os.path.join(
 sheet_name = "Master Summary"
 df = pd.read_excel(file_path, sheet_name=sheet_name, header=None, engine="openpyxl")
 print(f"Loaded sheet: {sheet_name}\n")
+
+# -----------------------------
+# Time History Export
+# -----------------------------
+if Time_History_Export:
+    from openpyxl import load_workbook
+    import openpyxl
+    from copy import copy as _copy
+
+    history_file = os.path.join(
+        home_dir,
+        "Vaeridion GmbH",
+        "Aircraft Team - 0055 Mass and Performance Management",
+        "01 Mass Management Process",
+        "03 Excel Spreadsheets",
+        "Mass_Analysis_History.xlsx",
+    )
+
+    history_sheet_name = "PBS_Masses_" + datetime.now().strftime("%Y%m%d")
+
+    # Load source workbook (data_only=True resolves formula values)
+    _src_wb = load_workbook(file_path, data_only=True)
+    _src_ws = _src_wb[sheet_name]
+
+    # Load or create target workbook
+    if os.path.exists(history_file):
+        _tgt_wb = load_workbook(history_file)
+    else:
+        _tgt_wb = openpyxl.Workbook()
+        # Remove the default blank sheet created by openpyxl
+        if "Sheet" in _tgt_wb.sheetnames:
+            del _tgt_wb["Sheet"]
+
+    # Replace sheet with the same date if it already exists
+    if history_sheet_name in _tgt_wb.sheetnames:
+        del _tgt_wb[history_sheet_name]
+        print(f"Replaced existing sheet '{history_sheet_name}' in Mass_Analysis_History.xlsx")
+
+    # Create new sheet and copy all cell values + styles
+    _tgt_ws = _tgt_wb.create_sheet(title=history_sheet_name)
+    for _row in _src_ws.iter_rows():
+        for _cell in _row:
+            _tgt_cell = _tgt_ws.cell(row=_cell.row, column=_cell.column, value=_cell.value)
+            if _cell.has_style:
+                _tgt_cell.font = _copy(_cell.font)
+                _tgt_cell.border = _copy(_cell.border)
+                _tgt_cell.fill = _copy(_cell.fill)
+                _tgt_cell.number_format = _cell.number_format
+                _tgt_cell.protection = _copy(_cell.protection)
+                _tgt_cell.alignment = _copy(_cell.alignment)
+
+    # Copy column widths and row heights
+    for _key, _col_dim in _src_ws.column_dimensions.items():
+        _tgt_ws.column_dimensions[_key].width = _col_dim.width
+        _tgt_ws.column_dimensions[_key].hidden = _col_dim.hidden
+    for _key, _row_dim in _src_ws.row_dimensions.items():
+        _tgt_ws.row_dimensions[_key].height = _row_dim.height
+        _tgt_ws.row_dimensions[_key].hidden = _row_dim.hidden
+
+    _tgt_wb.save(history_file)
+    print(f"Time history exported: sheet '{history_sheet_name}' saved to:\n  {history_file}\n")
+else:
+    print("Time history export skipped (Time_History_Export = False)\n")
 
 # -----------------------------
 # Utilities
@@ -484,7 +555,7 @@ def plot_component_pdfs(components, pert_params, plot_name="Input Components"):
         fig_title = f"{plot_name}{part_label}"
         plt.suptitle(fig_title)
         plt.tight_layout(rect=[0, 0, 1, 0.98])
-        fname = sanitize_filename(fig_title) + ".png"
+        fname = sanitize_filename(fig_title) + FIG_EXT
         plt.savefig(fname, dpi=300)
         plt.close()
         saved_files.append(fname)
@@ -510,7 +581,7 @@ def plot_monte_carlo_pdf(samples, title):
         plt.legend()
         plt.grid(True, alpha=0.3)
         plt.tight_layout()
-        plt.savefig(sanitize_filename(title) + ".png", dpi=300)
+        plt.savefig(sanitize_filename(title) + FIG_EXT, dpi=300)
         plt.close()
         return
 
@@ -526,7 +597,7 @@ def plot_monte_carlo_pdf(samples, title):
     plt.legend()
     plt.grid(True, alpha=0.3)
     plt.tight_layout()
-    plt.savefig(sanitize_filename(title) + ".png", dpi=300)
+    plt.savefig(sanitize_filename(title) + FIG_EXT, dpi=300)
     plt.close()
 
 def plot_monte_carlo_cdf(samples, title):
@@ -545,7 +616,7 @@ def plot_monte_carlo_cdf(samples, title):
         plt.ylabel("Cumulative probability")
         plt.grid(True, alpha=0.3)
         plt.tight_layout()
-        plt.savefig(sanitize_filename(title) + ".png", dpi=300)
+        plt.savefig(sanitize_filename(title) + FIG_EXT, dpi=300)
         plt.close()
         return
 
@@ -559,7 +630,7 @@ def plot_monte_carlo_cdf(samples, title):
     plt.ylabel("Cumulative probability")
     plt.grid(True, alpha=0.3)
     plt.tight_layout()
-    plt.savefig(sanitize_filename(title) + ".png", dpi=300)
+    plt.savefig(sanitize_filename(title) + FIG_EXT, dpi=300)
     plt.close()
 # %%
 # ============================================================
@@ -617,7 +688,7 @@ def plot_aircraft_pdf(samples, title):
     plt.grid(True, alpha=0.3)
     plt.tight_layout()
 
-    fname = sanitize_filename(title) + ".png"
+    fname = sanitize_filename(title) + FIG_EXT
     plt.savefig(fname, dpi=300)
     plt.close()
 
@@ -706,7 +777,7 @@ def plot_aircraft_cdf(samples, title):
     plt.grid(True, alpha=0.3)
     plt.tight_layout()
 
-    fname = sanitize_filename(title) + ".png"
+    fname = sanitize_filename(title) + FIG_EXT
     plt.savefig(fname, dpi=300)
     plt.close()
 
@@ -753,25 +824,29 @@ print("\nMass simulation completed successfully.")
 
 # 1) Always generate the Component-level PERT distributions for the Appendix
 print("\n=== Generating Component-level PERT distributions for Appendix ===\n")
-for group_name, items in by_group.items():
-    if not items:
-        continue
+# 1) Component-level L3 PERT distribution plots (gated by Include_L3_Input_Distributions)
+if Include_L3_Input_Distributions:
+    for group_name, items in by_group.items():
+        if not items:
+            continue
 
-    # Sub-group the L3 components by their L2 parent
-    by_l2: dict[str, list] = {}
-    for it in items:
-        by_l2.setdefault(it["l2_parent"], []).append(it)
+        # Sub-group the L3 components by their L2 parent
+        by_l2: dict[str, list] = {}
+        for it in items:
+            by_l2.setdefault(it["l2_parent"], []).append(it)
 
-    for l2_name, l2_items in by_l2.items():
-        pert_params = [
-            make_pert_params(it["predicted"], it["neg_unc"], it["pos_unc"]) for it in l2_items
-        ]
-        component_tuples = [(it["name"], it["predicted"], it["neg_unc"], it["pos_unc"]) for it in l2_items]
-        plot_component_pdfs(
-            component_tuples,
-            pert_params,
-            plot_name=f"{group_name} - {l2_name} - Component PERT Distributions"
-        )
+        for l2_name, l2_items in by_l2.items():
+            pert_params = [
+                make_pert_params(it["predicted"], it["neg_unc"], it["pos_unc"]) for it in l2_items
+            ]
+            component_tuples = [(it["name"], it["predicted"], it["neg_unc"], it["pos_unc"]) for it in l2_items]
+            plot_component_pdfs(
+                component_tuples,
+                pert_params,
+                plot_name=f"{group_name} - {l2_name} - Component PERT Distributions"
+            )
+else:
+    print("L3 PERT input distributions skipped (Include_L3_Input_Distributions = False)\n")
 
 # 2) Optionally create L2 PDFs/CDFs when exports enabled
 if L2_simulations_exports:
@@ -830,25 +905,25 @@ print(f"\nSaving all plots and results to:\n  {results_folder}\n")
 # ------------------------------------------------------------
 
 # Filenames for the two aircraft-level figures (match plot titles + sanitize)
-AIRCRAFT_PDF_IMG = sanitize_filename("Aircraft Operating Empty Mass PDF") + ".png"
-AIRCRAFT_CDF_IMG = sanitize_filename("Aircraft Operating Empty Mass CDF") + ".png"
+AIRCRAFT_PDF_IMG = sanitize_filename("Aircraft Operating Empty Mass PDF") + FIG_EXT
+AIRCRAFT_CDF_IMG = sanitize_filename("Aircraft Operating Empty Mass CDF") + FIG_EXT
 
-png_files = glob.glob("*.png")
-for f in png_files:
+fig_files = glob.glob(f"*{FIG_EXT}")
+for f in fig_files:
     dest = os.path.join(results_folder, f)
     try:
         os.replace(f, dest)  # atomic move if possible
     except Exception:
         import shutil
         shutil.move(f, dest)
-print(f"Saved {len(png_files)} image files.")
+print(f"Saved {len(fig_files)} image files.")
 
 # Additionally keep a copy of all images outside the LaTeX build in a dedicated
 # `figures` folder next to the timestamped results. This ensures images are
 # available independently of the report build tree.
 figures_dir = os.path.join(results_folder, "figures")
 os.makedirs(figures_dir, exist_ok=True)
-moved_pngs = list(Path(results_folder).glob("*.png"))
+moved_pngs = list(Path(results_folder).glob(f"*{FIG_EXT}"))
 for img in moved_pngs:
     try:
         shutil.copy2(str(img), os.path.join(figures_dir, img.name))
@@ -990,7 +1065,7 @@ else:
         shutil.move(str(src), str(dst))
 
     # Move any remaining PNGs (L1B group figures) into the Chapter1 figures folder
-    for f in Path(results_folder).glob("*.png"):
+    for f in Path(results_folder).glob(f"*{FIG_EXT}"):
         if f.name in [AIRCRAFT_PDF_IMG, AIRCRAFT_CDF_IMG]:
             continue
         dst = CHAPTER_FIGURES_DIR / f.name
@@ -1115,6 +1190,18 @@ else:
             total_pos_unc   = sum(it.get("pos_unc",   0.0) for it in items)
             total_neg_unc   = sum(it.get("neg_unc",   0.0) for it in items)
 
+            # L2 summary row comes first (double rule underneath via extra \hline)
+            summary_row = (
+                r"\textbf{" + tex_escape(f"{l2_name}") + r"} & "
+                + r"\textbf{" + fmt_kg(total_basic)     + r"} & "
+                + r"\textbf{" + fmt_kg(total_mga)       + r"} & "
+                + r"\textbf{" + fmt_kg(total_predicted) + r"} & "
+                + r"\textbf{" + fmt_kg(total_pos_unc)   + r"} & "
+                + r"\textbf{" + fmt_kg(total_neg_unc)   + r"} \\ \hline"
+            )
+            rows.append(summary_row)
+
+            # L3 detail rows follow, sorted alphabetically
             for it in sorted(items, key=lambda x: x.get("name", "")):
                 title = tex_escape(it.get("name", ""))
                 basic = fmt_kg(it.get("basic", 0.0))
@@ -1124,18 +1211,6 @@ else:
                 dn = fmt_kg(it.get("neg_unc", 0.0))  # stays signed (typically negative)
                 row = f"{title} & {basic} & {mga} & {predicted} & {up} & {dn} \\\\ \\hline"
                 rows.append(row)
-
-            # Totals / summary row — an extra \hline creates a double rule above it
-            summary_row = (
-                r"\hline" + "\n"
-                + r"\textbf{" + tex_escape(f"{l2_name} -- Total") + r"} & "
-                + r"\textbf{" + fmt_kg(total_basic)     + r"} & "
-                + r"\textbf{" + fmt_kg(total_mga)       + r"} & "
-                + r"\textbf{" + fmt_kg(total_predicted) + r"} & "
-                + r"\textbf{" + fmt_kg(total_pos_unc)   + r"} & "
-                + r"\textbf{" + fmt_kg(total_neg_unc)   + r"} \\\\ \\hline"
-            )
-            rows.append(summary_row)
         else:
             # Keep the frame and show a single info row spanning all columns
             rows.append(r"\multicolumn{6}{|l|}{\emph{No L3 components for this L2 system.}} \\ \hline")
@@ -1172,26 +1247,23 @@ else:
     # (0) Aircraft-level target parameters: include imported aircraft parameters
     # --- Aircraft Mass Target Parameters as a description list with siunitx ---
     buf.write(r"\section{Aircraft Mass Target Parameters}" + "\n")
-    buf.write(r"\small\begin{description}" + "\n")
+    buf.write(r"The following parameters are used to determine the aircraft mass target to which the simulation result of the mass breakdown is compared." + "\n\n")
+    buf.write(r"\begin{itemize}" + "\n")
 
     # Helper to escape only the label (so we don't break \SI macros)
     def _label(s: str) -> str:
         return tex_escape(s)  # you already defined tex_escape earlier
 
-    buf.write(fr"\item[{_label('MTOM:')}] \SI{{{DESIRED_MTOM:.1f}}}{{\kilogram}}" + "\n")
-    buf.write(fr"\item[{_label('Payload:')}] \SI{{{DESIRED_PAYLOAD:.1f}}}{{\kilogram}}" + "\n")
-    buf.write(fr"\item[{_label('Aircraft mass limit (OEM):')}] \SI{{{AIRCRAFT_MASS_LIMIT:.1f}}}{{\kilogram}}" + "\n")
-    buf.write(fr"\item[{_label('In-service mass growth:')}] \SI{{{IN_SERVICE_MASS_GROWTH:.1f}}}{{\kilogram}}" + "\n")
-    buf.write(fr"\item[{_label('Entry-into-service mass:')}] \SI{{{ENTRY_INTO_SERVICE_MASS:.1f}}}{{\kilogram}}" + "\n")
-    buf.write(fr"\item[{_label('Aircraft target mass (OEM):')}] \SI{{{OEM_TARGET:.1f}}}{{\kilogram}}" + "\n")
+    buf.write(fr"\item MTOM: \SI{{{DESIRED_MTOM:.1f}}}{{\kilogram}}" + "\n")
+    buf.write(fr"\item Payload: \SI{{{DESIRED_PAYLOAD:.1f}}}{{\kilogram}}" + "\n")
+    buf.write(fr"\item Aircraft mass limit (OEM): \SI{{{AIRCRAFT_MASS_LIMIT:.1f}}}{{\kilogram}}" + "\n")
+    buf.write(fr"\item In-service mass growth: \SI{{{IN_SERVICE_MASS_GROWTH:.1f}}}{{\kilogram}}" + "\n")
+    buf.write(fr"\item Entry-into-service mass: \SI{{{ENTRY_INTO_SERVICE_MASS:.1f}}}{{\kilogram}}" + "\n")
+    buf.write(fr"\item Aircraft target mass (OEM): \SI{{{OEM_TARGET:.1f}}}{{\kilogram}}" + "\n")
+    buf.write(fr"\item Confidence level: P{int(CONFIDENCE_LEVEL)}" + "\n")
+    buf.write(fr"\item Mass margin: \SI{{{APPLICABLE_MASS_MARGIN_PCT:.1f}}}{{\percent}}" + "\n")
 
-    # Keep your original 'Pxx' percentile style (not a unit)
-    buf.write(fr"\item[{_label('Confidence level:')}] P{int(CONFIDENCE_LEVEL)}" + "\n")
-
-    # Percentage as a proper unit
-    buf.write(fr"\item[{_label('Mass margin from sheet:')}] \SI{{{APPLICABLE_MASS_MARGIN_PCT:.1f}}}{{\percent}}" + "\n")
-
-    buf.write(r"\end{description}" + "\n\n")
+    buf.write(r"\end{itemize}" + "\n\n")
 
     # (1) Input Data: one section per L1B group; one subsection + table per L2 system
 
@@ -1215,19 +1287,24 @@ else:
                 p5 = p50 = p95 = 0
                 L1B_basic_mass = L1B_predicted_mass = L1B_MGA = 0
 
-            buf.write(r"\small\begin{description}" + "\n")
-            buf.write(fr"\item[{_label('L3 components:')}] \num{{{len(items)}}}" + "\n")
-            buf.write(fr"\item[{_label('Total basic mass:')}] \SI{{{L1B_basic_mass:.1f}}}{{\kilogram}}" + "\n")
-            buf.write(fr"\item[{_label('Total predicted mass:')}] \SI{{{L1B_predicted_mass:.1f}}}{{\kilogram}}" + "\n")
-            buf.write(fr"\item[{_label('Total MGA:')}] \SI{{{L1B_MGA:.1f}}}{{\kilogram}}" + "\n")
-            buf.write(fr"\item[{_label('Monte Carlo median (P50):')}] \SI{{{p50:.1f}}}{{\kilogram}}" + "\n")
-            buf.write(fr"\item[{_label('Uncertainty band (P5--P95):')}] "
-                    fr"\SIrange{{{p5:.1f}}}{{{p95:.1f}}}{{\kilogram}}" + "\n")
-            buf.write(r"\end{description}" + "\n\n")
+            buf.write(
+                r"A summary of the mass properties of the "
+                + tex_escape(g)
+                + r" group is given below. The details of the mass properties of the contained L2 systems are presented in the following sections."
+                + "\n\n"
+            )
+            buf.write(r"\begin{itemize}" + "\n")
+            buf.write(fr"\item L3 components: \num{{{len(items)}}}" + "\n")
+            buf.write(fr"\item Total basic mass: \SI{{{L1B_basic_mass:.1f}}}{{\kilogram}}" + "\n")
+            buf.write(fr"\item Total predicted mass: \SI{{{L1B_predicted_mass:.1f}}}{{\kilogram}}" + "\n")
+            buf.write(fr"\item Total MGA: \SI{{{L1B_MGA:.1f}}}{{\kilogram}}" + "\n")
+            buf.write(fr"\item Monte Carlo median (P50): \SI{{{p50:.1f}}}{{\kilogram}}" + "\n")
+            buf.write(fr"\item Uncertainty band (P5--P95): \SIrange{{{p5:.1f}}}{{{p95:.1f}}}{{\kilogram}}" + "\n")
+            buf.write(r"\end{itemize}" + "\n\n")
 
             # Optional L1B PDF/CDF figures (only present when L1B_simulations_exports was True)
-            l1b_pdf_img = sanitize_filename(f"{g} - Mass Distribution (L1B)") + ".png"
-            l1b_cdf_img = sanitize_filename(f"{g} - Mass CDF (L1B)") + ".png"
+            l1b_pdf_img = sanitize_filename(f"{g} - Mass Distribution (L1B)") + FIG_EXT
+            l1b_cdf_img = sanitize_filename(f"{g} - Mass CDF (L1B)") + FIG_EXT
             l1b_pdf_path = CHAPTER_FIGURES_DIR / l1b_pdf_img
             l1b_cdf_path = CHAPTER_FIGURES_DIR / l1b_cdf_img
 
@@ -1261,8 +1338,8 @@ else:
                 buf.write("\n")
 
                 # Optional L2 PDF/CDF figures (only present when L2_simulations_exports was True)
-                l2_pdf_img = sanitize_filename(f"{g} - {l2_name} - Mass Distribution (L2)") + ".png"
-                l2_cdf_img = sanitize_filename(f"{g} - {l2_name} - Mass CDF (L2)") + ".png"
+                l2_pdf_img = sanitize_filename(f"{g} - {l2_name} - Mass Distribution (L2)") + FIG_EXT
+                l2_cdf_img = sanitize_filename(f"{g} - {l2_name} - Mass CDF (L2)") + FIG_EXT
                 l2_pdf_path = CHAPTER_FIGURES_DIR / l2_pdf_img
                 l2_cdf_path = CHAPTER_FIGURES_DIR / l2_cdf_img
 
@@ -1367,60 +1444,62 @@ else:
     # ============================================================
     # Appendix: Level 3 PERT distributions (one section per L1B group,
     #           one subsection per L2 system)
+    # Only included when Include_L3_Input_Distributions is True
     # ============================================================
 
-    buf.write(r"\appendix" + "\n")
-    buf.write(r"\chapter{Level 3 PERT-Distributions}" + "\n\n")
-    for g in group_names:
-        items_for_group = by_group.get(g, [])
-        buf.write(r"\section{" + tex_escape(g) + r"}" + "\n")
+    if Include_L3_Input_Distributions:
+        buf.write(r"\appendix" + "\n")
+        buf.write(r"\chapter{Level 3 PERT-Distributions}" + "\n\n")
+        for g in group_names:
+            items_for_group = by_group.get(g, [])
+            buf.write(r"\section{" + tex_escape(g) + r"}" + "\n")
 
-        # Collect ordered unique L2 parents, preserving first-seen order
-        seen_l2: list[str] = []
-        for it in items_for_group:
-            lp = it.get("l2_parent", "Unknown")
-            if lp not in seen_l2:
-                seen_l2.append(lp)
+            # Collect ordered unique L2 parents, preserving first-seen order
+            seen_l2: list[str] = []
+            for it in items_for_group:
+                lp = it.get("l2_parent", "Unknown")
+                if lp not in seen_l2:
+                    seen_l2.append(lp)
 
-        for l2_name in seen_l2:
-            buf.write(r"\subsection{" + tex_escape(l2_name) + r"}" + "\n")
-            base_plot_name = f"{g} - {l2_name} - Component PERT Distributions"
+            for l2_name in seen_l2:
+                buf.write(r"\subsection{" + tex_escape(l2_name) + r"}" + "\n")
+                base_plot_name = f"{g} - {l2_name} - Component PERT Distributions"
 
-            # Check for paginated parts first (Part 1, Part 2, ...)
-            part_idx = 1
-            found_any = False
-            while True:
-                comp_img = sanitize_filename(f"{base_plot_name} - Part {part_idx}") + ".png"
-                comp_img_path = CHAPTER_FIGURES_DIR / comp_img
-                if not comp_img_path.exists():
-                    break
-                found_any = True
-                buf.write(r"\begin{figure}[H]" + "\n")
-                buf.write(r"\centering" + "\n")
-                buf.write(r"\includegraphics[width=0.95\textwidth]{Chapter1/figures/" + comp_img.replace("\\", "/") + "}\n")
-                buf.write(
-                    r"\caption{Component PERT distributions for "
-                    + tex_escape(g) + r" -- " + tex_escape(l2_name)
-                    + r" (Part " + str(part_idx) + r")}" + "\n"
-                )
-                buf.write(r"\end{figure}" + "\n\n")
-                part_idx += 1
-
-            # Fall back to the single-page (no-suffix) file when all fits on one figure
-            if not found_any:
-                comp_img = sanitize_filename(base_plot_name) + ".png"
-                comp_img_path = CHAPTER_FIGURES_DIR / comp_img
-                if comp_img_path.exists():
+                # Check for paginated parts first (Part 1, Part 2, ...)
+                part_idx = 1
+                found_any = False
+                while True:
+                    comp_img = sanitize_filename(f"{base_plot_name} - Part {part_idx}") + FIG_EXT
+                    comp_img_path = CHAPTER_FIGURES_DIR / comp_img
+                    if not comp_img_path.exists():
+                        break
+                    found_any = True
                     buf.write(r"\begin{figure}[H]" + "\n")
                     buf.write(r"\centering" + "\n")
                     buf.write(r"\includegraphics[width=0.95\textwidth]{Chapter1/figures/" + comp_img.replace("\\", "/") + "}\n")
                     buf.write(
                         r"\caption{Component PERT distributions for "
-                        + tex_escape(g) + r" -- " + tex_escape(l2_name) + r"}" + "\n"
+                        + tex_escape(g) + r" -- " + tex_escape(l2_name)
+                        + r" (Part " + str(part_idx) + r")}" + "\n"
                     )
                     buf.write(r"\end{figure}" + "\n\n")
-                else:
-                    buf.write("% Component PERT distributions image not present for this L2 system; omitted.\n\n")
+                    part_idx += 1
+
+                # Fall back to the single-page (no-suffix) file when all fits on one figure
+                if not found_any:
+                    comp_img = sanitize_filename(base_plot_name) + FIG_EXT
+                    comp_img_path = CHAPTER_FIGURES_DIR / comp_img
+                    if comp_img_path.exists():
+                        buf.write(r"\begin{figure}[H]" + "\n")
+                        buf.write(r"\centering" + "\n")
+                        buf.write(r"\includegraphics[width=0.95\textwidth]{Chapter1/figures/" + comp_img.replace("\\", "/") + "}\n")
+                        buf.write(
+                            r"\caption{Component PERT distributions for "
+                            + tex_escape(g) + r" -- " + tex_escape(l2_name) + r"}" + "\n"
+                        )
+                        buf.write(r"\end{figure}" + "\n\n")
+                    else:
+                        buf.write("% Component PERT distributions image not present for this L2 system; omitted.\n\n")
 
     CHAPTER_TEX.write_text(buf.getvalue(), encoding="utf-8")
     print(f"Chapter written: {CHAPTER_TEX}")

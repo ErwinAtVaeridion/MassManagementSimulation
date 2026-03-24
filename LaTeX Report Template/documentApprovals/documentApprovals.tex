@@ -1,15 +1,64 @@
 \chapter*{Document Approval}
 
 \begin{table}[h]
-	%\begin{table}[h]
-\begin{tabular}{|l|l|p{1.5in}|p{2in}|}\hline
-	& Name & Position & Signature \\
-	\hline 
-	Prepared by & \authorName & \authorFunction &    \\[1.5cm]
-	\hline
-	Checked by &  \checkerName & \checkerFunction &	 \\[1.5cm]
-	\hline
-	Approved by &	\approverName & \approverFunction & \\[1.5cm]
-	\hline
-	\end{tabular}
-\end{table} 
+\setlength{\tabcolsep}{6pt}
+\begin{tabular}{|p{1.5in}|p{3.5in}|p{1.5in}|}
+\hline
+\textbf{Name} & \textbf{Position} & \textbf{Signature} \\ \hline
+
+% --- Prepared By ---
+Person Name & Mass Management Responsible & \\[1.5cm] \hline
+
+% --- Checked By ---
+Person Name & \checkerFunction & \\[1.5cm] \hline
+
+% --- Approved By (management) ---
+Person Name & Chief Engineer & \\[1.5cm] \hline
+Person Name & CTO & \\[1.5cm] \hline
+
+% =========================================================
+% SYSTEM OWNERS (grouped under Approved By)
+% =========================================================
+\multicolumn{3}{|l|}{\textbf{Approved by — System Owners}} \\ \hline
+
+% --- L2 SYSTEM OWNERS ---
+
+% Systems 21–50
+Person Name & System Owner, 21 -- Environmental Control, \textless job title\textgreater & \\[1.2cm] \hline
+Person Name & System Owner, 22 -- Auto-Flight, \textless job title\textgreater & \\[1.2cm] \hline
+Person Name & System Owner, 23 -- Communications, \textless job title\textgreater & \\[1.2cm] \hline
+Person Name & System Owner, 24 -- Electrical Power, \textless job title\textgreater & \\[1.2cm] \hline
+Person Name & System Owner, 25 -- Equipment and Furnishings, \textless job title\textgreater & \\[1.2cm] \hline
+Person Name & System Owner, 26 -- Fire Protection, \textless job title\textgreater & \\[1.2cm] \hline
+Person Name & System Owner, 27 -- Flight Controls, \textless job title\textgreater & \\[1.2cm] \hline
+Person Name & System Owner, 29 -- Hydraulic Power, \textless job title\textgreater & \\[1.2cm] \hline
+Person Name & System Owner, 30 -- Ice and Rain Protection, \textless job title\textgreater & \\[1.2cm] \hline
+Person Name & System Owner, 31 -- Indicating and Recording System, \textless job title\textgreater & \\[1.2cm] \hline
+Person Name & System Owner, 32 -- Landing Gear, \textless job title\textgreater & \\[1.2cm] \hline
+Person Name & System Owner, 33 -- Lights, \textless job title\textgreater & \\[1.2cm] \hline
+Person Name & System Owner, 34 -- Navigation, \textless job title\textgreater & \\[1.2cm] \hline
+Person Name & System Owner, 35 -- Oxygen, \textless job title\textgreater & \\[1.2cm] \hline
+Person Name & System Owner, 44 -- Cabin Systems, \textless job title\textgreater & \\[1.2cm] \hline
+Person Name & System Owner, 45 -- Central Maintenance System, \textless job title\textgreater & \\[1.2cm] \hline
+Person Name & System Owner, 46 -- Information System, \textless job title\textgreater & \\[1.2cm] \hline
+Person Name & System Owner, 50 -- Cargo and Accessory Compartments, \textless job title\textgreater & \\[1.2cm] \hline
+
+% --- Airframe ---
+Person Name & System Owner, 52 -- Doors, \textless job title\textgreater & \\[1.2cm] \hline
+Person Name & System Owner, 53 -- Fuselage, \textless job title\textgreater & \\[1.2cm] \hline
+Person Name & System Owner, 55 -- Stabilisers, \textless job title\textgreater & \\[1.2cm] \hline
+Person Name & System Owner, 56 -- Windows, \textless job title\textgreater & \\[1.2cm] \hline
+Person Name & System Owner, 57 -- Wing, \textless job title\textgreater & \\[1.2cm] \hline
+
+% --- Propulsion ---
+Person Name & System Owner, 61 -- Propeller, \textless job title\textgreater & \\[1.2cm] \hline
+Person Name & System Owner, 63 -- Propeller Drives, \textless job title\textgreater & \\[1.2cm] \hline
+Person Name & System Owner, 71 -- Power Plant, \textless job title\textgreater & \\[1.2cm] \hline
+Person Name & System Owner, 72 -- Engine Electric, \textless job title\textgreater & \\[1.2cm] \hline
+Person Name & System Owner, 76 -- Engine Controls, \textless job title\textgreater & \\[1.2cm] \hline
+Person Name & System Owner, 77 -- Engine Indicating, \textless job title\textgreater & \\[1.2cm] \hline
+Person Name & System Owner, 79 -- Oil, \textless job title\textgreater & \\[1.2cm] \hline
+Person Name & System Owner, 87 -- Propulsion Battery, \textless job title\textgreater & \\[1.2cm] \hline
+
+\end{tabular}
+\end{table}
